@@ -108,9 +108,9 @@ generic direct memory-block pointer is for readers honoring the read-only
 flags; internal clients must not write through it. Legacy DMA masks cannot
 reach this window, so stage content through CPU copies into ordinary RAM.
 
-Save states/rewind remain unsupported for content-backed games and are
-rejected through the existing prototype state guards. Future states must
-include bank selection and verify the full content identity.
+The [state prototype](fx-state-prototype.md) preserves bank selection and the
+invalid-bank flag and verifies the complete content identity. Payload bytes
+remain in the ROM file; states do not duplicate immutable content.
 
 ## Original diagnostics
 

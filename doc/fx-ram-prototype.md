@@ -2,8 +2,9 @@
 
 Implemented on 2026-10-12 as the first part of numbered Step 6. This is a
 provisional emulator interface, with a 16 MiB maximum rather than a finished
-large-memory architecture. Larger content, general CPU acceleration, extended
-save states, and the public SDK remain later work.
+large-memory architecture. General CPU acceleration, extended persistent storage,
+and the public SDK remain later work. Enhanced states are described in
+[fx-state-prototype.md](fx-state-prototype.md).
 
 ## Build and run
 
@@ -106,13 +107,9 @@ with this extension; use explicit guest routines until their assumptions are
 audited. RAM-reset SWIs retain their original hardware contract; emulator
 reset clears FX RAM.
 
-Core save/load operations reject the RAM prototype because ordinary GBA
-states omit this allocation. Shared raw and PNG saving now propagate core
-rejection; raw named saving obtains a successful snapshot before modifying
-its destination. Failed core loading stops before restoring extension data.
-Rewind discards failed captures rather than appending invalid history. The
-launcher disables it for the demonstration. These changes do not provide
-enhanced state serialization; normal save states remain supported.
+Enhanced raw/PNG states and bounded rewind are now supported by the
+[state prototype](fx-state-prototype.md). The launcher keeps rewind off unless
+`-Rewind` is supplied. State loading requires the same RAM grant and ROM.
 
 ## Verification
 
@@ -121,7 +118,7 @@ descriptor limits, 1/4/16 MiB accesses, aliases, last-word alignment, raw
 inspection/patching, memory listing, ARM-to-Thumb-to-IWRAM transitions,
 instruction fetch across a small grant's mirror boundary, block transfers,
 DMA masks, HLE BIOS copying, reset, failed mapping, admission failure,
-enhanced-to-normal cleanup, raw/PNG save rejection, rewind rejection, and
+enhanced-to-normal cleanup, raw/PNG state handling, rewind, and
 ordinary raw/PNG state round trips.
 
 `ram.gba` writes an address-dependent pattern to every granted word, reads

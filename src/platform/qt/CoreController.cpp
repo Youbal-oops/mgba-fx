@@ -666,6 +666,8 @@ void CoreController::loadState(int slot) {
 		if (mCoreLoadState(context->core, controller->m_stateSlot, controller->m_loadStateFlags)) {
 			emit controller->frameAvailable();
 			emit controller->stateLoaded();
+		} else {
+			emit controller->statusPosted(tr("State load failed. Check the game, saved RAM grant, CPU profile, and Tools > View logs."));
 		}
 	});
 }
@@ -691,6 +693,8 @@ void CoreController::loadState(const QString& path, int flags) {
 		if (mCoreLoadStateNamed(context->core, vf, controller->m_loadStateFlags)) {
 			emit controller->frameAvailable();
 			emit controller->stateLoaded();
+		} else {
+			emit controller->statusPosted(tr("State load failed. Check the game, saved RAM grant, CPU profile, and Tools > View logs."));
 		}
 		vf->close(vf);
 	});
@@ -721,6 +725,8 @@ void CoreController::loadState(QIODevice* iodev, int flags) {
 		if (mCoreLoadStateNamed(context->core, vf, controller->m_loadStateFlags)) {
 			emit controller->frameAvailable();
 			emit controller->stateLoaded();
+		} else {
+			emit controller->statusPosted(tr("State load failed. Check the game, saved RAM grant, CPU profile, and Tools > View logs."));
 		}
 		vf->close(vf);
 	});

@@ -6,12 +6,15 @@
 #include <mgba/core/core.h>
 #include <mgba/core/rewind.h>
 #include <mgba/core/serialize.h>
+#include <mgba/core/thread.h>
 #include <mgba/gba/core.h>
 #ifdef M_CORE_GB
 #include <mgba/gb/core.h>
 #endif
 #include <mgba/internal/gba/gba.h>
+#include <mgba/internal/gba/serialize.h>
 #include <mgba/internal/gba/io.h>
+#include <mgba/internal/gba/fx-test.h>
 #include <mgba-util/crc32.h>
 #include <mgba-util/patch.h>
 #include <mgba-util/vfs.h>
@@ -348,6 +351,61 @@ M_TEST_DEFINE(enhancedPatchingRejected) {
 	free(rom);
 }
 
+M_TEST_DEFINE(instanceMemoryClaims) {
+#ifdef _WIN32
+	int first = 0, second = 0;
+	mHostResourceRegister(&first);
+	mHostResourceRegister(&second);
+	assert_true(mHostResourceClaimMemory(&first, 700, 1000));
+	assert_false(mHostResourceClaimMemory(&second, 400, 1000));
+	assert_true(mHostResourceClaimMemory(&second, 300, 1000));
+	mHostResourceSetMemoryReplacement(&second, &first);
+	assert_false(mHostResourceClaimMemory(&second, 1100, 1000));
+	assert_true(mHostResourceClaimMemory(&second, 700, 1000));
+	mHostResourceSetMemoryReplacement(&second, 0);
+	assert_false(mHostResourceClaimMemory(&first, 900, 1000));
+	mHostResourceReleaseMemory(&second);
+	assert_true(mHostResourceClaimMemory(&first, 900, 1000));
+	mHostResourceUnregister(&first);
+	assert_true(mHostResourceClaimMemory(&second, 1000, 1000));
+	mHostResourceUnregister(&second);
+#endif
+}
+
+M_TEST_DEFINE(instanceMemoryLoading) {
+#ifdef _WIN32
+	uint8_t* rom = _rom();
+	struct mCore* first = _core();
+	struct mCore* second = _core();
+	assert_true(_load(first, rom, BOOT_SIZE + GBA_FX_FOOTER_SIZE));
+	assert_false(_load(second, rom, BOOT_SIZE + GBA_FX_FOOTER_SIZE));
+	assert_false(((struct GBA*) second->board)->fx.active);
+	assert_null(((struct GBA*) second->board)->fx.budgetOwner);
+	((struct GBA*) second->board)->fxPolicy.memoryMiB = 128;
+	assert_true(_load(second, rom, BOOT_SIZE + GBA_FX_FOOTER_SIZE));
+	assert_ptr_equal(((struct GBA*) second->board)->fx.budgetOwner, second->board);
+	((struct GBA*) second->board)->fxPolicy.memoryMiB = 0;
+	mHostResourceSetMemoryReplacement(second->board, first->board);
+	assert_true(_load(second, rom, BOOT_SIZE + GBA_FX_FOOTER_SIZE));
+	mHostResourceSetMemoryReplacement(second->board, 0);
+	assert_true(_load(first, rom, BOOT_SIZE));
+	assert_true(_load(second, rom, BOOT_SIZE));
+	struct mHostResources host;
+	assert_true(mHostResourcesQuery(&host));
+	uint64_t available = host.availableBytes < host.addressBytes ? host.availableBytes : host.addressBytes;
+	assert_true(mHostResourceClaimMemory(first->board, available, available));
+	mHostResourceReleaseMemory(first->board);
+	assert_true(_load(first, rom, BOOT_SIZE + GBA_FX_FOOTER_SIZE));
+	rom[BOOT_SIZE] = 2;
+	assert_false(_load(first, rom, BOOT_SIZE + GBA_FX_FOOTER_SIZE));
+	assert_true(mHostResourceClaimMemory(second->board, available, available));
+	mHostResourceReleaseMemory(second->board);
+	_destroy(first);
+	_destroy(second);
+	free(rom);
+#endif
+}
+
 M_TEST_DEFINE(resourceBudget) {
 	struct GBAFXPolicy policy;
 	GBAFXPolicyDefaults(&policy);
@@ -506,6 +564,8 @@ static void _audioTrace(struct mAVStream* stream, int16_t left, int16_t right) {
 
 static struct mCore* _timingCore(bool fast, bool thumb) {
 	struct mCore* core = _core();
+	mCoreConfigSetIntValue(&core->config, "gba.fxMemoryMiB", 256);
+	((struct GBA*) core->board)->fxPolicy.memoryMiB = 256;
 	core->opts.skipBios = true;
 	core->opts.useBios = false;
 	uint8_t* rom = _rom();
@@ -675,18 +735,40 @@ M_TEST_DEFINE(dmaTimingAndData) {
 	assert_int_equal(finished[0], finished[1]);
 }
 
-M_TEST_DEFINE(experimentalStateRejected) {
-	struct mCore* core = _timingCore(true, false);
-	size_t size = core->stateSize(core);
-	uint8_t* stateBuffer = malloc(size);
-	assert_non_null(stateBuffer);
-	memset(stateBuffer, 0xA5, size);
-	assert_false(core->saveState(core, stateBuffer));
-	assert_int_equal(stateBuffer[0], 0xA5);
-	assert_false(core->loadState(core, stateBuffer));
-	assert_true(((struct GBA*) core->board)->fx.alu2x);
-	free(stateBuffer);
-	_destroy(core);
+M_TEST_DEFINE(experimentalStateRestored) {
+	unsigned thumb;
+	for (thumb = 0; thumb < 2; ++thumb) {
+		struct mCore* core = _timingCore(true, thumb != 0);
+		struct GBA* gba = core->board;
+		core->runFrame(core);
+		gba->fx.aluPhase = 1;
+		uint64_t instructions = gba->fx.acceleratedInstructions;
+		size_t size = core->stateSize(core);
+		void* snapshot = malloc(size);
+		void* continuation = malloc(size);
+		assert_non_null(snapshot);
+		assert_non_null(continuation);
+		assert_true(core->saveState(core, snapshot));
+		struct TimingTrace trace = { .stream.postAudioFrame = _audioTrace };
+		core->setAVStream(core, &trace.stream);
+		core->runFrame(core);
+		unsigned samples = trace.samples;
+		uint32_t audioHash = trace.audioHash;
+		assert_true(core->saveState(core, continuation));
+		assert_true(core->loadState(core, snapshot));
+		assert_int_equal(gba->fx.aluPhase, 1);
+		assert_int_equal(gba->fx.acceleratedInstructions, instructions);
+		trace.samples = 0;
+		trace.audioHash = 0;
+		core->runFrame(core);
+		assert_int_equal(trace.samples, samples);
+		assert_int_equal(trace.audioHash, audioHash);
+		assert_true(core->saveState(core, snapshot));
+		assert_memory_equal(snapshot, continuation, size);
+		free(snapshot);
+		free(continuation);
+		_destroy(core);
+	}
 }
 
 M_TEST_DEFINE(legacyInstructionCosts) {
@@ -943,42 +1025,57 @@ M_TEST_DEFINE(ramLifecycle) {
 	free(rom);
 }
 
-M_TEST_DEFINE(ramStateRejected) {
+M_TEST_DEFINE(ramStateRestored) {
 	struct mCore* core = _ramCore(1048576);
-	uint8_t* snapshot = malloc(core->stateSize(core));
-	assert_non_null(snapshot);
-	memset(snapshot, 0xA5, core->stateSize(core));
-	assert_false(core->saveState(core, snapshot));
-	assert_int_equal(snapshot[0], 0xA5);
-	core->busWrite32(core, GBA_FX_RAM_BASE, 42);
-	assert_false(core->loadState(core, snapshot));
-	assert_int_equal(core->busRead32(core, GBA_FX_RAM_BASE), 42);
-	struct VFile* output = VFileMemChunk("KEEP", 4);
-	assert_false(mCoreSaveStateNamed(core, output, 0));
-	assert_int_equal(output->size(output), 4);
-	char retained[4];
-	output->seek(output, 0, SEEK_SET);
-	assert_int_equal(output->read(output, retained, 4), 4);
-	assert_memory_equal(retained, "KEEP", 4);
 	mColor* pixels = calloc(240 * 160, sizeof(*pixels));
 	assert_non_null(pixels);
 	core->setVideoBuffer(core, pixels, 240);
 	core->reset(core);
-	assert_false(mCoreSaveStateNamed(core, output, SAVESTATE_SCREENSHOT));
-	assert_int_equal(output->size(output), 4);
-	output->close(output);
+	size_t size = core->stateSize(core);
+	uint8_t* snapshot = malloc(size);
+	assert_non_null(snapshot);
+	core->busWrite32(core, GBA_FX_RAM_BASE, 42);
+	core->busWrite32(core, GBA_FX_RAM_BASE + 1048572, 43);
+	assert_true(core->saveState(core, snapshot));
+	core->busWrite32(core, GBA_FX_RAM_BASE, 13);
+	assert_true(core->loadState(core, snapshot));
+	assert_int_equal(core->busRead32(core, GBA_FX_RAM_BASE), 42);
+	assert_int_equal(core->busRead32(core, GBA_FX_RAM_BASE + 1048572), 43);
+	snapshot[size - 1] ^= 1;
+	core->busWrite32(core, GBA_FX_RAM_BASE, 13);
+	assert_false(core->loadState(core, snapshot));
+	assert_int_equal(core->busRead32(core, GBA_FX_RAM_BASE), 13);
+	snapshot[size - 1] ^= 1;
+	struct mCore* different = _ramCore(4194304);
+	assert_false(different->loadState(different, snapshot));
+	_destroy(different);
+	unsigned format;
+	for (format = 0; format < 2; ++format) {
+		struct VFile* output = VFileMemChunk(0, 0);
+		core->busWrite32(core, GBA_FX_RAM_BASE, 42);
+		assert_true(mCoreSaveStateNamed(core, output, format ? SAVESTATE_SCREENSHOT : 0));
+		core->busWrite32(core, GBA_FX_RAM_BASE, 13);
+		assert_true(mCoreLoadStateNamed(core, output, 0));
+		assert_int_equal(core->busRead32(core, GBA_FX_RAM_BASE), 42);
+		output->close(output);
+	}
 	struct mCoreRewindContext rewind = {0};
 	mCoreRewindContextInit(&rewind, 4, false);
-	struct VFile* previous = rewind.previousState;
+	core->busWrite32(core, GBA_FX_RAM_BASE, 42);
 	mCoreRewindAppend(&rewind, core);
-	assert_ptr_equal(rewind.previousState, previous);
-	assert_int_equal(rewind.size, 0);
+	core->busWrite32(core, GBA_FX_RAM_BASE, 43);
+	mCoreRewindAppend(&rewind, core);
+	core->busWrite32(core, GBA_FX_RAM_BASE, 44);
+	mCoreRewindAppend(&rewind, core);
+	assert_true(mCoreRewindRestore(&rewind, core, 2));
+	assert_int_equal(core->busRead32(core, GBA_FX_RAM_BASE), 42);
 	mCoreRewindContextDeinit(&rewind);
 	uint8_t* rom = _rom();
 	assert_true(_load(core, rom, BOOT_SIZE));
 	free(rom);
 	core->reset(core);
-	unsigned format;
+	assert_int_equal(core->stateSize(core), sizeof(struct GBASerializedState));
+	assert_false(core->loadState(core, snapshot));
 	for (format = 0; format < 2; ++format) {
 		struct VFile* normalState = VFileMemChunk(0, 0);
 		core->busWrite32(core, GBA_BASE_EWRAM, 42);
@@ -992,6 +1089,183 @@ M_TEST_DEFINE(ramStateRejected) {
 	_destroy(core);
 	free(pixels);
 }
+
+static void _stateChecksum(uint8_t* snapshot, size_t size) {
+	size_t offset = sizeof(struct GBASerializedState) + 0x34;
+	uint32_t checksum = crc32(0, snapshot, offset);
+	checksum = crc32(checksum, snapshot + offset + 4, size - offset - 4);
+	_write32(snapshot + offset, checksum);
+}
+
+M_TEST_DEFINE(stateValidationAndRollback) {
+	struct mCore* core = _ramCore(1048576);
+	struct GBA* gba = core->board;
+	GBASavedataInitSRAM(&gba->memory.savedata);
+	core->busWrite8(core, GBA_BASE_SRAM + 0x123, 73);
+	size_t size = core->stateSize(core);
+	uint8_t* saved = malloc(size);
+	uint8_t* damaged = malloc(size);
+	uint8_t* before = malloc(size);
+	uint8_t* after = malloc(size);
+	assert_non_null(saved);
+	assert_non_null(damaged);
+	assert_non_null(before);
+	assert_non_null(after);
+	core->busWrite32(core, GBA_FX_RAM_BASE, 42);
+	assert_true(core->saveState(core, saved));
+	core->busWrite32(core, GBA_FX_RAM_BASE, 13);
+	assert_true(core->saveState(core, before));
+	const size_t offsets[] = {
+		sizeof(struct GBASerializedState) + 0x20,
+		sizeof(struct GBASerializedState) + 0x24,
+		sizeof(struct GBASerializedState) + 0x28,
+		sizeof(struct GBASerializedState) + 0x2C,
+		sizeof(struct GBASerializedState) + 0x30,
+		offsetof(struct GBASerializedState, cpu.gprs) + ARM_PC * 4,
+		offsetof(struct GBASerializedState, cpu.gprs) + ARM_PC * 4,
+		offsetof(struct GBASerializedState, cpu.cpsr),
+		offsetof(struct GBASerializedState, cpu.cycles)
+	};
+	const uint32_t values[] = { 1, 2, 2, 1, 2, GBA_FX_CONTENT_BASE, 0x09001000, 0, UINT32_MAX };
+	size_t i;
+	for (i = 0; i < sizeof(offsets) / sizeof(*offsets); ++i) {
+		memcpy(damaged, saved, size);
+		_write32(damaged + offsets[i], values[i]);
+		_stateChecksum(damaged, size);
+		assert_false(core->loadState(core, damaged));
+		assert_true(core->saveState(core, after));
+		assert_memory_equal(before, after, size);
+	}
+	struct VFile* truncated = VFileMemChunk(saved, size - 1);
+	assert_false(mCoreLoadStateNamed(core, truncated, 0));
+	truncated->close(truncated);
+	struct VFile* missing = VFileMemChunk(saved, sizeof(struct GBASerializedState));
+	assert_false(mCoreLoadStateNamed(core, missing, 0));
+	missing->close(missing);
+	memcpy(damaged, saved, size);
+	((struct GBASerializedState*) damaged)->savedata.type = GBA_SAVEDATA_FLASH512;
+	_stateChecksum(damaged, size);
+	struct VFile* output = VFileMemChunk(damaged, size);
+	struct mStateExtdata extdata;
+	mStateExtdataInit(&extdata);
+	uint8_t invalid = 0;
+	struct mStateExtdataItem item = { .data = &invalid, .size = 1 };
+	mStateExtdataPut(&extdata, EXTDATA_SUBSYSTEM_START + GBA_SUBSYSTEM_VIDEO_RENDERER, &item);
+	output->seek(output, size, SEEK_SET);
+	assert_true(mStateExtdataSerialize(&extdata, output));
+	mStateExtdataDeinit(&extdata);
+	assert_false(mCoreLoadStateNamed(core, output, 0));
+	assert_int_equal(core->busRead8(core, GBA_BASE_SRAM + 0x123), 73);
+	assert_true(core->saveState(core, after));
+	assert_memory_equal(before, after, size);
+	output->close(output);
+	free(saved);
+	free(damaged);
+	free(before);
+	free(after);
+	_destroy(core);
+}
+
+M_TEST_DEFINE(stateCartridgeSaveAndExtraction) {
+	struct mCore* core = _ramCore(1048576);
+	struct GBA* gba = core->board;
+	mColor* pixels = calloc(240 * 160, sizeof(*pixels));
+	assert_non_null(pixels);
+	core->setVideoBuffer(core, pixels, 240);
+	GBASavedataInitSRAM(&gba->memory.savedata);
+	unsigned format;
+	for (format = 0; format < 2; ++format) {
+		struct VFile* output = VFileMemChunk(0, 0);
+		core->busWrite8(core, GBA_BASE_SRAM + 0x123, 42);
+		assert_true(mCoreSaveStateNamed(core, output, SAVESTATE_SAVEDATA | (format ? SAVESTATE_SCREENSHOT : 0)));
+		core->busWrite8(core, GBA_BASE_SRAM + 0x123, 13);
+		assert_true(mCoreLoadStateNamed(core, output, SAVESTATE_SAVEDATA));
+		assert_int_equal(core->busRead8(core, GBA_BASE_SRAM + 0x123), 42);
+		struct mCore* converter = _core();
+		struct mStateExtdata extdata;
+		mStateExtdataInit(&extdata);
+		assert_true(mCoreExtractExtdata(converter, output, &extdata));
+		struct mStateExtdataItem item;
+		assert_true(mStateExtdataGet(&extdata, EXTDATA_SAVEDATA, &item));
+		assert_int_equal(item.size, GBA_SIZE_SRAM);
+		assert_int_equal(((const uint8_t*) item.data)[0x123], 42);
+		void* prefix = mCoreExtractState(converter, output, 0);
+		assert_non_null(prefix);
+		uint32_t magic;
+		LOAD_32(magic, 0, prefix);
+		assert_int_equal(magic, GBA_FX_STATE_MAGIC);
+		mappedMemoryFree(prefix, converter->stateSize(converter));
+		mStateExtdataDeinit(&extdata);
+		_destroy(converter);
+		output->close(output);
+	}
+	_destroy(core);
+	free(pixels);
+}
+
+M_TEST_DEFINE(stateGrantsAndRewindBudget) {
+	uint32_t sizes[] = {1048576, 4194304, 16777216};
+	size_t i;
+	for (i = 0; i < sizeof(sizes) / sizeof(*sizes); ++i) {
+		struct mCore* core = _ramCore(sizes[i]);
+		struct GBA* gba = core->board;
+		size_t size = core->stateSize(core);
+		uint8_t* snapshot = malloc(size);
+		assert_non_null(snapshot);
+		uint32_t word;
+		for (word = 0; word < sizes[i] / 4; ++word) {
+			gba->fx.ram[word] = 0xA5C39E71U ^ word;
+		}
+		assert_true(core->saveState(core, snapshot));
+		core->reset(core);
+		assert_true(core->loadState(core, snapshot));
+		assert_memory_equal(gba->fx.ram, snapshot + sizeof(struct GBASerializedState) + GBA_FX_STATE_HEADER_SIZE, sizes[i]);
+		gba->fx.budget.valid = true;
+		gba->fx.budget.headroomBytes = 8 * size + 1048576;
+		assert_int_equal(mCoreRewindCapacity(core, 300), 0);
+		gba->fx.budget.headroomBytes += 3 * (64 * size + 16384);
+		assert_int_equal(mCoreRewindCapacity(core, 300), 3);
+		assert_int_equal(mCoreRewindCapacity(core, 2), 2);
+		free(snapshot);
+		_destroy(core);
+	}
+}
+
+#ifndef DISABLE_THREADING
+M_TEST_DEFINE(stateThreadRewindPressure) {
+	struct mCore* core = _ramCore(1048576);
+	struct GBA* gba = core->board;
+	mColor* pixels = calloc(240 * 160, sizeof(*pixels));
+	assert_non_null(pixels);
+	core->setVideoBuffer(core, pixels, 240);
+	core->opts.audioSync = false;
+	core->opts.videoSync = false;
+	core->opts.rewindEnable = true;
+	core->opts.rewindBufferCapacity = 300;
+	core->opts.rewindBufferInterval = 1;
+	gba->fx.budget.valid = true;
+	gba->fx.budget.headroomBytes = 0;
+	struct mCoreThread thread = { .core = core };
+	assert_true(mCoreThreadStart(&thread));
+	mCoreThreadPause(&thread);
+	assert_null(thread.impl->rewind.currentState);
+	core->runFrame(core);
+	size_t size = core->stateSize(core);
+	gba->fx.budget.headroomBytes = 8 * size + 1048576 + 3 * (64 * size + 16384);
+	mCoreThreadRewindParamsChanged(&thread);
+	assert_int_equal(mCoreRewindPatchesSize(&thread.impl->rewind.patchMemory), 3);
+	core->busWrite32(core, GBA_FX_RAM_BASE, 42);
+	core->runFrame(core);
+	gba->fx.budget.headroomBytes = 0;
+	core->runFrame(core);
+	assert_null(thread.impl->rewind.currentState);
+	assert_int_equal(core->busRead32(core, GBA_FX_RAM_BASE), 42);
+	mCoreThreadEnd(&thread);
+	mCoreThreadJoin(&thread);
+	_destroy(core);
+	free(pixels);
+}
+#endif
 
 static uint8_t _contentByte(uint32_t offset) {
 	return (0xA5C39E71U ^ (offset >> 2)) >> ((offset & 3) * 8);
@@ -1098,8 +1372,13 @@ M_TEST_DEFINE(contentBanksAndBounds) {
 	assert_int_equal((uint32_t) cpu->gprs[0], 0xA5C39E71U);
 	assert_int_equal((uint32_t) cpu->gprs[1], 0xA5C39E70U);
 	void* snapshot = malloc(core->stateSize(core));
-	assert_false(core->saveState(core, snapshot));
-	assert_false(core->loadState(core, snapshot));
+	core->busWrite32(core, 0x040003A0, 2);
+	core->busWrite32(core, 0x040003A0, UINT32_MAX);
+	assert_true(core->saveState(core, snapshot));
+	core->busWrite32(core, 0x040003A0, 0);
+	assert_true(core->loadState(core, snapshot));
+	assert_int_equal(gba->fx.contentBank, 2);
+	assert_true(gba->fx.invalidBank);
 	free(snapshot);
 	cpu->memory.setActiveRegion(cpu, GBA_FX_CONTENT_BASE);
 	assert_int_equal(cpu->memory.activeMask, 0);
@@ -1164,7 +1443,67 @@ M_TEST_DEFINE(contentMappingFailure) {
 	free(rom);
 }
 
+static uint32_t _testGrantRead(uint32_t address, void* context) {
+	struct mCore* core = context;
+	return core->busRead32(core, address);
+}
+
+M_TEST_DEFINE(adaptiveGrantAndArena) {
+	unsigned i;
+	for (i = 0; i < 3; ++i) {
+		uint32_t size = 1048576U << (i * 2);
+		struct mCore* core = _ramCore(size);
+		struct GBA* gba = core->board;
+		struct GBAFXTestGrant grant;
+		assert_true(GBAFXTestQuery(&grant, _testGrantRead, core));
+		assert_int_equal(grant.ramBytes, size);
+		assert_int_equal(grant.arithmeticProfile, 1);
+		grant.contentBytes = 1048576;
+		uint32_t cacheSize = GBAFXTestCacheSize(&grant);
+		assert_int_equal(cacheSize, size / 16);
+		struct GBAFXTestArena arena;
+		assert_true(GBAFXTestArenaInit(&arena, &grant));
+		assert_int_equal(GBAFXTestAllocate(&arena, GBA_FX_TEST_REQUIRED_BYTES, 4), GBA_FX_RAM_BASE);
+		uint32_t cache = GBAFXTestAllocate(&arena, cacheSize, 64);
+		assert_int_equal(cache, GBA_FX_RAM_BASE + GBA_FX_TEST_REQUIRED_BYTES);
+		core->busWrite32(core, cache + cacheSize - 4, 0x12345678);
+		assert_int_equal(core->busRead32(core, cache + cacheSize - 4), 0x12345678);
+		uint32_t next = arena.next;
+		assert_int_equal(GBAFXTestAllocate(&arena, size, 4), 0);
+		assert_int_equal(GBAFXTestAllocate(&arena, 4, 3), 0);
+		assert_int_equal(GBAFXTestAllocate(&arena, UINT32_MAX, 64), 0);
+		assert_int_equal(arena.next, next);
+		mCoreConfigSetIntValue(&core->config, "gba.fxMemoryMiB", 256);
+		core->loadConfig(core, &core->config);
+		struct GBAFXTestGrant unchanged;
+		assert_true(GBAFXTestQuery(&unchanged, _testGrantRead, core));
+		assert_int_equal(unchanged.ramBytes, size);
+		core->reset(core);
+		assert_int_equal(gba->fx.ramSize, size);
+		_destroy(core);
+	}
+}
+
+M_TEST_DEFINE(adaptiveInvalidGrant) {
+	struct mCore* core = _core();
+	struct GBAFXTestGrant grant = { .ramBytes = 1 };
+	assert_false(GBAFXTestQuery(&grant, _testGrantRead, core));
+	assert_int_equal(grant.ramBytes, 0);
+	struct GBAFXTestArena arena;
+	assert_false(GBAFXTestArenaInit(&arena, &grant));
+	assert_int_equal(GBAFXTestCacheSize(&grant), 0);
+	grant.features = GBA_FX_FEATURE_RAM;
+	grant.ramBytes = GBA_FX_RAM_MAX + 1;
+	assert_false(GBAFXTestArenaInit(&arena, &grant));
+	grant.ramBytes = 1048576;
+	grant.contentBytes = 7;
+	assert_int_equal(GBAFXTestCacheSize(&grant), 4);
+	_destroy(core);
+}
+
 M_TEST_SUITE_DEFINE(GBAFX,
+	cmocka_unit_test(adaptiveGrantAndArena),
+	cmocka_unit_test(adaptiveInvalidGrant),
 	cmocka_unit_test(contentDescriptor),
 	cmocka_unit_test(contentBanksAndBounds),
 	cmocka_unit_test(contentMappingFailure),
@@ -1172,7 +1511,13 @@ M_TEST_SUITE_DEFINE(GBAFX,
 	cmocka_unit_test(ramAccess),
 	cmocka_unit_test(ramExecutionAndTransfers),
 	cmocka_unit_test(ramLifecycle),
-	cmocka_unit_test(ramStateRejected),
+	cmocka_unit_test(ramStateRestored),
+	cmocka_unit_test(stateValidationAndRollback),
+	cmocka_unit_test(stateCartridgeSaveAndExtraction),
+	cmocka_unit_test(stateGrantsAndRewindBudget),
+#ifndef DISABLE_THREADING
+	cmocka_unit_test(stateThreadRewindPressure),
+#endif
 	cmocka_unit_test(experimentalFeatureGate),
 #ifdef GBA_FX_TIMING_EXPERIMENT
 	cmocka_unit_test(fractionalRetirement),
@@ -1180,11 +1525,13 @@ M_TEST_SUITE_DEFINE(GBAFX,
 	cmocka_unit_test(thumbComputeAndPeripherals),
 	cmocka_unit_test(haltAndInterruptTiming),
 	cmocka_unit_test(dmaTimingAndData),
-	cmocka_unit_test(experimentalStateRejected),
+	cmocka_unit_test(experimentalStateRestored),
 	cmocka_unit_test(legacyInstructionCosts),
 	cmocka_unit_test(wrappingAndEventOrder),
 #endif
 	cmocka_unit_test(resourceBudget),
+	cmocka_unit_test(instanceMemoryClaims),
+	cmocka_unit_test(instanceMemoryLoading),
 	cmocka_unit_test(resourcePolicyValidation),
 	cmocka_unit_test(resourceLifecycle),
 	cmocka_unit_test(fileReadBehavior),

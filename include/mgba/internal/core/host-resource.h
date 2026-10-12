@@ -27,6 +27,11 @@ enum mHostCPUStatus {
 };
 
 bool mHostResourcesQuery(struct mHostResources* resources);
+/* Reserve a whole run budget against other enhanced cores in this process. */
+bool mHostResourceClaimMemory(const void* owner, uint64_t bytes, uint64_t available);
+void mHostResourceReleaseMemory(const void* owner);
+/* The predecessor must be paused during admission and closed on success. */
+void mHostResourceSetMemoryReplacement(const void* owner, const void* predecessor);
 /* All initialized cores register, so ordinary cores suppress process-wide limits. */
 void mHostResourceRegister(const void* owner);
 void mHostResourceUnregister(const void* owner);

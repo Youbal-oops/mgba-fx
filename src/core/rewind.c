@@ -7,12 +7,50 @@
 
 #include <mgba/core/core.h>
 #include <mgba/core/serialize.h>
+#ifdef M_CORE_GBA
+#include <mgba/internal/gba/gba.h>
+#endif
 #include <mgba-util/patch/fast.h>
 #include <mgba-util/vfs.h>
 
 DEFINE_VECTOR(mCoreRewindPatches, struct PatchFast);
 
 static void _rewindDiff(struct mCoreRewindContext* context);
+
+size_t mCoreRewindCapacity(struct mCore* core, size_t requested) {
+	UNUSED(core);
+#ifdef M_CORE_GBA
+	if (core->platform(core) == mPLATFORM_GBA) {
+		const struct GBA* gba = core->board;
+		if (gba->fx.active) {
+			if (!gba->fx.budget.valid) {
+				return 0;
+			}
+			uint64_t stateSize = core->stateSize(core);
+			// Two growing VFile buffers, save/load scratch, subsystem data,
+			// and worst-case growing diff vectors rather than typical deltas.
+			uint64_t scratch = 8 * stateSize + 1048576;
+			uint64_t headroom = gba->fx.budget.headroomBytes;
+			struct mHostResources host;
+			if (mHostResourcesQuery(&host)) {
+				if (host.availableBytes < headroom) {
+					headroom = host.availableBytes;
+				}
+				if (host.addressBytes < headroom) {
+					headroom = host.addressBytes;
+				}
+			}
+			// Sparse 16-byte changes can each occupy a 528-byte extent,
+			// and vector growth can nearly double allocated storage.
+			uint64_t capacity = headroom > scratch ? (headroom - scratch) / (64 * stateSize + 16384) : 0;
+			if (capacity < requested) {
+				return capacity;
+			}
+		}
+	}
+#endif
+	return requested;
+}
 
 #ifndef DISABLE_THREADING
 THREAD_ENTRY _rewindThread(void* context);
@@ -71,6 +109,9 @@ void mCoreRewindContextDeinit(struct mCoreRewindContext* context) {
 }
 
 void mCoreRewindAppend(struct mCoreRewindContext* context, struct mCore* core) {
+	if (!context->currentState || !mCoreRewindPatchesSize(&context->patchMemory)) {
+		return;
+	}
 #ifndef DISABLE_THREADING
 	if (context->onThread) {
 		MutexLock(&context->mutex);
@@ -166,7 +207,7 @@ bool mCoreRewindRestore(struct mCoreRewindContext* context, struct mCore* core, 
 		context->currentState = nextState;
 	}
 
-	mCoreLoadStateNamed(core, context->currentState, SAVESTATE_SAVEDATA | SAVESTATE_RTC);
+	bool loaded = mCoreLoadStateNamed(core, context->currentState, SAVESTATE_SAVEDATA | SAVESTATE_RTC);
 
 
 #ifndef DISABLE_THREADING
@@ -174,7 +215,7 @@ bool mCoreRewindRestore(struct mCoreRewindContext* context, struct mCore* core, 
 		MutexUnlock(&context->mutex);
 	}
 #endif
-	return true;
+	return loaded;
 }
 
 #ifndef DISABLE_THREADING

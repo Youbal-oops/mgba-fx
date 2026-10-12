@@ -327,14 +327,14 @@ mPlatform SaveConverter::getStatePlatform(VFile* vf) {
 		core = GBACoreCreate();
 		core->init(core);
 		state = mCoreExtractState(core, vf, nullptr);
-		core->deinit(core);
 		if (state) {
 			LOAD_32LE(magic, 0, state);
-			if (magic - GBASavestateMagic <= GBASavestateVersion) {
+			if (magic - GBASavestateMagic <= GBASavestateVersion || magic == GBA_FX_STATE_MAGIC) {
 				platform = mPLATFORM_GBA;
 			}
 			mappedMemoryFree(state, core->stateSize(core));
 		}
+		core->deinit(core);
 	}
 #endif
 #ifdef M_CORE_GB
@@ -342,7 +342,6 @@ mPlatform SaveConverter::getStatePlatform(VFile* vf) {
 		core = GBCoreCreate();
 		core->init(core);
 		state = mCoreExtractState(core, vf, nullptr);
-		core->deinit(core);
 		if (state) {
 			LOAD_32LE(magic, 0, state);
 			if (magic - GBSavestateMagic <= GBSavestateVersion) {
@@ -350,6 +349,7 @@ mPlatform SaveConverter::getStatePlatform(VFile* vf) {
 			}
 			mappedMemoryFree(state, core->stateSize(core));
 		}
+		core->deinit(core);
 	}
 #endif
 

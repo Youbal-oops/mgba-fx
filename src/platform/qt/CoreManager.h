@@ -26,8 +26,8 @@ public:
 	void setPreload(bool preload) { m_preload = preload; }
 
 public slots:
-	CoreController* loadGame(const QString& path);
-	CoreController* loadGame(VFile* vf, const QString& path, const QString& base);
+	CoreController* loadGame(const QString& path, CoreController* replacement = nullptr);
+	CoreController* loadGame(VFile* vf, const QString& path, const QString& base, CoreController* replacement = nullptr);
 	CoreController* loadBIOS(int platform, const QString& path);
 
 signals:

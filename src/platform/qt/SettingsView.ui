@@ -1507,7 +1507,14 @@
              <bool>true</bool>
             </property>
             <property name="text">
-              <string>Reopen an enhanced game to apply changes. Marked RAM prototypes can receive up to 16 MiB of extra guest RAM within this budget. Windows enforces the CPU limit when available. Games report the actual grant and whether the limit is active. Ordinary games use their usual behavior.</string>
+              <string>These are host resource ceilings, not allocations of game RAM. Reopen an enhanced game to apply changes. The current prototype supports up to 16 MiB of extra game RAM and 128 MiB of content. CPU limits are enforced when available; File > Game resources shows the actual grant and enforcement status. Budgets also cover overhead, content, and optional rewind history.</string>
+            </property>
+           </widget>
+          </item>
+          <item row="4" column="1">
+           <widget class="QPushButton" name="fxDefaults">
+            <property name="text">
+             <string>Reset resource limits to 80%</string>
             </property>
            </widget>
           </item>

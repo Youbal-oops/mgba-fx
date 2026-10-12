@@ -11,6 +11,12 @@
 #include <mgba/core/version.h>
 #include <mgba-util/memory.h>
 #include <mgba-util/vfs.h>
+#ifdef M_CORE_GBA
+#include <mgba/internal/gba/serialize.h>
+#endif
+#ifdef M_CORE_GB
+#include <mgba/internal/gb/gb.h>
+#endif
 
 #ifdef USE_PNG
 #include <mgba-util/image/png-io.h>
@@ -24,6 +30,7 @@ struct mBundledState {
 	size_t stateSize;
 	void* state;
 	struct mStateExtdata* extdata;
+	bool decoded;
 };
 
 struct mStateExtdataHeader {
@@ -128,10 +135,16 @@ bool mStateExtdataDeserialize(struct mStateExtdata* extdata, struct VFile* vf) {
 			continue;
 		}
 		ssize_t position = vf->seek(vf, 0, SEEK_CUR);
+		ssize_t fileSize = vf->size(vf);
+		if (header.size < 0 || header.offset < position || header.offset > fileSize ||
+		    header.size > fileSize - header.offset) {
+			return false;
+		}
 		if (vf->seek(vf, header.offset, SEEK_SET) < 0) {
 			return false;
 		}
 		if (header.size <= 0) {
+			vf->seek(vf, position, SEEK_SET);
 			continue;
 		}
 		struct mStateExtdataItem item = {
@@ -140,11 +153,11 @@ bool mStateExtdataDeserialize(struct mStateExtdata* extdata, struct VFile* vf) {
 			.clean = free
 		};
 		if (!item.data) {
-			continue;
+			return false;
 		}
 		if (vf->read(vf, item.data, header.size) != header.size) {
 			free(item.data);
-			continue;
+			return false;
 		}
 		mStateExtdataPut(extdata, header.tag, &item);
 		vf->seek(vf, position, SEEK_SET);
@@ -218,7 +231,16 @@ static int _loadPNGChunkHandler(png_structp png, png_unknown_chunkp chunk) {
 			return 1;
 		}
 		uLongf len = bundle->stateSize;
-		uncompress((Bytef*) state, &len, chunk->data, chunk->size);
+		int result = uncompress((Bytef*) state, &len, chunk->data, chunk->size);
+		bundle->decoded = result == Z_OK && len == bundle->stateSize;
+#ifdef M_CORE_GBA
+		// A converter without a loaded game needs only the ordinary prefix.
+		uint32_t magic;
+		LOAD_32LE(magic, 0, state);
+		if (result == Z_BUF_ERROR && bundle->stateSize == sizeof(struct GBASerializedState) && magic == GBA_FX_STATE_MAGIC) {
+			bundle->decoded = true;
+		}
+#endif
 		return 1;
 	}
 	if (!strcmp((const char*) chunk->name, "gbAx")) {
@@ -271,6 +293,10 @@ static void* _loadPNGState(struct mCore* core, struct VFile* vf, struct mStateEx
 
 	size_t stateSize = core->stateSize(core);
 	void* state = anonymousMemoryMap(stateSize);
+	if (!state) {
+		PNGReadClose(png, info, end);
+		return NULL;
+	}
 	struct mBundledState bundle = {
 		.stateSize = stateSize,
 		.state = state,
@@ -301,6 +327,7 @@ static void* _loadPNGState(struct mCore* core, struct VFile* vf, struct mStateEx
 	bool success = true;
 	success = success && PNGReadPixels(png, info, pixels, width, height, width);
 	success = success && PNGReadFooter(png, end);
+	success = success && bundle.decoded;
 	PNGReadClose(png, info, end);
 
 	if (!success) {
@@ -387,7 +414,10 @@ bool mCoreSaveStateNamed(struct mCore* core, struct VFile* vf, int flags) {
 	mStateExtdataInit(&extdata);
 	size_t stateSize = core->stateSize(core);
 
-	core->saveExtraState(core, &extdata);
+	if (!core->saveExtraState(core, &extdata)) {
+		mStateExtdataDeinit(&extdata);
+		return false;
+	}
 	if (flags & SAVESTATE_METADATA) {
 		uint64_t* creationUsec = malloc(sizeof(*creationUsec));
 		if (creationUsec) {
@@ -498,12 +528,12 @@ bool mCoreSaveStateNamed(struct mCore* core, struct VFile* vf, int flags) {
 		mappedMemoryFree(snapshot, stateSize);
 		vf->unmap(vf, state, stateSize);
 		vf->seek(vf, stateSize, SEEK_SET);
-		mStateExtdataSerialize(&extdata, vf);
+		bool success = mStateExtdataSerialize(&extdata, vf);
 		mStateExtdataDeinit(&extdata);
 		if (cheatVf) {
 			cheatVf->close(cheatVf);
 		}
-		return true;
+		return success;
 #ifdef USE_PNG
 	} else {
 		bool success = _savePNGState(core, vf, &extdata, pixels, stride);
@@ -526,13 +556,17 @@ void* mCoreExtractState(struct mCore* core, struct VFile* vf, struct mStateExtda
 #endif
 	ssize_t stateSize = core->stateSize(core);
 	void* state = anonymousMemoryMap(stateSize);
+	if (!state) {
+		return NULL;
+	}
 	vf->seek(vf, 0, SEEK_SET);
 	if (vf->read(vf, state, stateSize) != stateSize) {
 		mappedMemoryFree(state, stateSize);
 		return 0;
 	}
-	if (extdata) {
-		mStateExtdataDeserialize(extdata, vf);
+	if (extdata && vf->size(vf) > stateSize && !mStateExtdataDeserialize(extdata, vf)) {
+		mappedMemoryFree(state, stateSize);
+		return NULL;
 	}
 	return state;
 }
@@ -547,6 +581,35 @@ bool mCoreExtractExtdata(struct mCore* core, struct VFile* vf, struct mStateExtd
 		return false;
 	}
 	ssize_t stateSize = core->stateSize(core);
+#ifdef M_CORE_GBA
+	if (core->platform(core) == mPLATFORM_GBA) {
+		uint32_t magic;
+		vf->seek(vf, 0, SEEK_SET);
+		if (vf->read(vf, &magic, 4) != 4) {
+			return false;
+		}
+		LOAD_32LE(magic, 0, &magic);
+		if (magic == GBA_FX_STATE_MAGIC) {
+			uint32_t header[3];
+			vf->seek(vf, sizeof(struct GBASerializedState), SEEK_SET);
+			if (vf->read(vf, header, sizeof(header)) != sizeof(header)) {
+				return false;
+			}
+			uint32_t headerMagic, headerSize, ramSize;
+			LOAD_32LE(headerMagic, 0, header);
+			LOAD_32LE(headerSize, 4, header);
+			LOAD_32LE(ramSize, 8, header);
+			if (headerMagic != magic || headerSize != GBA_FX_STATE_HEADER_SIZE || ramSize > GBA_FX_RAM_MAX ||
+			    (ramSize && (ramSize < 1048576 || (ramSize & (ramSize - 1))))) {
+				return false;
+			}
+			stateSize = sizeof(struct GBASerializedState) + GBA_FX_STATE_HEADER_SIZE + ramSize;
+			if (vf->size(vf) < stateSize) {
+				return false;
+			}
+		}
+	}
+#endif
 	vf->seek(vf, stateSize, SEEK_SET);
 	return mStateExtdataDeserialize(extdata, vf);
 }
@@ -556,16 +619,64 @@ bool mCoreLoadStateNamed(struct mCore* core, struct VFile* vf, int flags) {
 	mStateExtdataInit(&extdata);
 	void* state = mCoreExtractState(core, vf, &extdata);
 	if (!state) {
+		mStateExtdataDeinit(&extdata);
+		return false;
+	}
+	// Subsystem loaders can fail after the core has accepted a state.
+	// Retain a complete snapshot until both stages succeed.
+	size_t stateSize = core->stateSize(core);
+	void* previous = malloc(stateSize);
+	struct mStateExtdata previousExtdata;
+	mStateExtdataInit(&previousExtdata);
+	if (!previous || !core->saveState(core, previous) || !core->saveExtraState(core, &previousExtdata)) {
+		free(previous);
+		mappedMemoryFree(state, stateSize);
+		mStateExtdataDeinit(&previousExtdata);
+		mStateExtdataDeinit(&extdata);
+		return false;
+	}
+	void* previousSavedata = NULL;
+	size_t previousSavedataSize = core->savedataClone(core, &previousSavedata);
+	bool savedataReady = !previousSavedataSize || previousSavedata;
+#ifdef M_CORE_GBA
+	if (core->platform(core) == mPLATFORM_GBA && GBASavedataSize(&((struct GBA*) core->board)->memory.savedata)) {
+		savedataReady = previousSavedataSize && previousSavedata;
+	}
+#endif
+#ifdef M_CORE_GB
+	if (core->platform(core) == mPLATFORM_GB) {
+		const struct GB* gb = core->board;
+		if (gb->sramSize || (gb->sramVf && gb->sramVf->size(gb->sramVf) > 0)) {
+			savedataReady = previousSavedataSize && previousSavedata;
+		}
+	}
+#endif
+	if (!savedataReady) {
+		free(previousSavedata);
+		free(previous);
+		mappedMemoryFree(state, stateSize);
+		mStateExtdataDeinit(&previousExtdata);
+		mStateExtdataDeinit(&extdata);
 		return false;
 	}
 	bool success = core->loadState(core, state);
-	mappedMemoryFree(state, core->stateSize(core));
+	mappedMemoryFree(state, stateSize);
+	if (success && !core->loadExtraState(core, &extdata)) {
+		success = false;
+		if (!core->loadState(core, previous) || !core->loadExtraState(core, &previousExtdata)) {
+			mLOG(SAVESTATE, ERROR, "Failed to restore previous state after subsystem load failure");
+		}
+		if (previousSavedataSize && !core->savedataRestore(core, previousSavedata, previousSavedataSize, false)) {
+			mLOG(SAVESTATE, ERROR, "Failed to restore cartridge data after subsystem load failure");
+		}
+	}
+	free(previousSavedata);
+	free(previous);
+	mStateExtdataDeinit(&previousExtdata);
 	if (!success) {
 		mStateExtdataDeinit(&extdata);
 		return false;
 	}
-
-	core->loadExtraState(core, &extdata);
 
 	unsigned width, height;
 	core->currentVideoSize(core, &width, &height);

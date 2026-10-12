@@ -181,4 +181,42 @@ Build with `./tools/fx-build.ps1 -ContentPrototype`, then launch with
 `./tools/fx-run.ps1 -ContentPrototype`. This selects a separate
 `build-fx/content` build and generates original 64/128 MiB payload fixtures.
 See [fx-content-prototype.md](fx-content-prototype.md) for the bank window,
-checksum, budget, and access rules. Enhanced persistence remains unavailable.
+checksum, budget, and access rules. Enhanced persistence is described in [fx-state-prototype.md](fx-state-prototype.md).
+
+## Adaptive-resource proof, 2026-10-12
+
+Build with `./tools/fx-build.ps1 -AdaptivePrototype -TimingExperiment`, then
+launch with `./tools/fx-run.ps1 -AdaptivePrototype`. The separate
+`build-fx/adaptive` demonstration adjusts its optional content cache/work to
+the actual RAM grant while keeping frame-paced simulation updates. See
+[fx-adaptive-prototype.md](fx-adaptive-prototype.md) for its internal query/
+allocator helper, hardware-timer check, and remaining calibration work.
+
+## Enhanced persistence prototype, 2026-10-12
+
+The adaptive desktop build now supports complete enhanced raw/PNG state
+snapshots and optional budgeted rewind. Use the same build/run commands above;
+add `-Rewind -RewindEntries 30` when launching to request history. See
+[fx-state-prototype.md](fx-state-prototype.md) for compatibility rules,
+corruption checks, memory policy, and remaining limits.
+
+Verification: 27/27 desktop CTest suites, 39 enhanced FX cases, and 31 default
+FX cases passed. Complete CInema: 184 passes, 88 expected failures, no unexpected
+failures. The build workflow verified sixteen complete diagnostic screens.
+Evidence is in ignored `build-fx/milestone-5-states/`. Libretro save-path changes
+passed a GCC syntax check; runtime verification here targets Windows desktop.
+
+## Desktop resource integration, 2026-10-12
+
+The adaptive desktop build adds **File > Game resources**, live process
+measurements, pending-setting feedback, reset-to-80% settings, visible failed
+state-load messages, and conservative per-process enhanced-budget admission.
+Same-window replacements reuse the old entitlement while preserving failed
+loads. See [fx-desktop-resources.md](fx-desktop-resources.md) for controls,
+accounting scope, and the current prototype limits.
+
+Step 10 verification: 28/28 desktop suites (41 FX cases), 33 default-profile
+FX cases, sixteen complete diagnostic screens, and the available CInema
+regression (184 passes, 88 expected failures, zero unexpected failures).
+The real resource dialog was rendered and visually inspected; evidence is in
+ignored `build-fx/milestone-5-desktop/`.

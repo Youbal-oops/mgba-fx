@@ -11,6 +11,8 @@ static SRWLOCK _lock = SRWLOCK_INIT;
 static struct {
 	const void* owner;
 	unsigned percent;
+	uint64_t memoryBytes;
+	const void* predecessor;
 } _clients[64];
 static HANDLE _job;
 static bool _overflow;
@@ -125,6 +127,8 @@ void mHostResourceRegister(const void* owner) {
 	if (i < 64) {
 		_clients[i].owner = owner;
 		_clients[i].percent = 0;
+		_clients[i].memoryBytes = 0;
+		_clients[i].predecessor = 0;
 	} else {
 		_overflow = true;
 	}
@@ -139,10 +143,63 @@ void mHostResourceUnregister(const void* owner) {
 		if (_clients[i].owner == owner) {
 			_clients[i].owner = 0;
 			_clients[i].percent = 0;
+			_clients[i].memoryBytes = 0;
+			_clients[i].predecessor = 0;
 			break;
 		}
 	}
 	_apply();
+	ReleaseSRWLockExclusive(&_lock);
+}
+
+bool mHostResourceClaimMemory(const void* owner, uint64_t bytes, uint64_t available) {
+	AcquireSRWLockExclusive(&_lock);
+	unsigned client = 64;
+	unsigned i;
+	const void* predecessor = 0;
+	for (i = 0; i < 64; ++i) {
+		if (_clients[i].owner == owner) {
+			predecessor = _clients[i].predecessor;
+			break;
+		}
+	}
+	for (i = 0; i < 64; ++i) {
+		if (_clients[i].owner == owner) {
+			client = i;
+		} else if (_clients[i].owner && _clients[i].owner != predecessor) {
+			uint64_t claimed = _clients[i].memoryBytes;
+			available = claimed > available ? 0 : available - claimed;
+		}
+	}
+	bool admitted = !_overflow && client < 64 && bytes <= available;
+	if (admitted) {
+		_clients[client].memoryBytes = bytes;
+	}
+	ReleaseSRWLockExclusive(&_lock);
+	return admitted;
+}
+
+void mHostResourceSetMemoryReplacement(const void* owner, const void* predecessor) {
+	AcquireSRWLockExclusive(&_lock);
+	unsigned i;
+	for (i = 0; i < 64; ++i) {
+		if (_clients[i].owner == owner) {
+			_clients[i].predecessor = predecessor;
+			break;
+		}
+	}
+	ReleaseSRWLockExclusive(&_lock);
+}
+
+void mHostResourceReleaseMemory(const void* owner) {
+	AcquireSRWLockExclusive(&_lock);
+	unsigned i;
+	for (i = 0; i < 64; ++i) {
+		if (_clients[i].owner == owner) {
+			_clients[i].memoryBytes = 0;
+			break;
+		}
+	}
 	ReleaseSRWLockExclusive(&_lock);
 }
 
@@ -169,6 +226,19 @@ enum mHostCPUStatus mHostResourceCPUStatus(unsigned* effectivePercent) {
 	return status;
 }
 #else
+void mHostResourceSetMemoryReplacement(const void* owner, const void* predecessor) {
+	UNUSED(owner);
+	UNUSED(predecessor);
+}
+bool mHostResourceClaimMemory(const void* owner, uint64_t bytes, uint64_t available) {
+	UNUSED(owner);
+	UNUSED(bytes);
+	UNUSED(available);
+	return false;
+}
+void mHostResourceReleaseMemory(const void* owner) {
+	UNUSED(owner);
+}
 bool mHostResourcesQuery(struct mHostResources* resources) {
 	memset(resources, 0, sizeof(*resources));
 	return false;

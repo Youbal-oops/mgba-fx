@@ -65,6 +65,7 @@ struct GBAFXState {
 	void* contentMapping;
 	const uint8_t* content;
 	struct GBAFXBudget budget;
+	const void* budgetOwner;
 	bool alu2x;
 	uint8_t aluPhase;
 	uint64_t acceleratedInstructions;

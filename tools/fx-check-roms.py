@@ -24,6 +24,7 @@ POLICY_FIELDS = _diagnostic.POLICY_FIELDS
 TIMING_FIELDS = _diagnostic.TIMING_FIELDS
 RAM_FIELDS = _diagnostic.RAM_FIELDS
 CONTENT_FIELDS = _diagnostic.CONTENT_FIELDS
+ADAPTIVE_FIELDS = _diagnostic.ADAPTIVE_FIELDS
 
 
 def read_png(path):
@@ -92,11 +93,11 @@ def verify(path, rom, mode, memory, cpu):
         data = source.read(256 * 1024)
         source.seek(-64, 2)
         footer = source.read(64)
-    asset = 0x1000 if mode in ("policy", "timing", "ram", "content") else 0x200 + int(mode) * PIXELS * 2
+    asset = 0x1000 if mode in ("policy", "timing", "ram", "content", "adaptive") else 0x200 + int(mode) * PIXELS * 2
     expected = [rgb555(value) for value in struct.unpack_from(f"<{PIXELS}H", data, asset)]
     values = []
-    if mode in ("policy", "timing", "ram", "content"):
-        fields = CONTENT_FIELDS if mode == "content" else RAM_FIELDS if mode == "ram" else TIMING_FIELDS if mode == "timing" else POLICY_FIELDS
+    if mode in ("policy", "timing", "ram", "content", "adaptive"):
+        fields = ADAPTIVE_FIELDS if mode == "adaptive" else CONTENT_FIELDS if mode == "content" else RAM_FIELDS if mode == "ram" else TIMING_FIELDS if mode == "timing" else POLICY_FIELDS
         for field, (label, _) in enumerate(fields):
             text = ""
             for digit in range(10):
@@ -140,6 +141,13 @@ def verify(path, rom, mode, memory, cpu):
         expected_values = [size, size // 4, 0, (size + 0xFFFFFF) // 0x1000000, last_byte, 1]
         if values != expected_values:
             raise ValueError(f"Content validation failed: {values} != {expected_values}")
+    if mode == "adaptive":
+        grant = {99: 1, 102: 4, 128: 16}[memory]
+        profile = 2 if struct.unpack_from("<I", footer, 8)[0] & 4 else 1
+        cache_kib = grant * 64
+        work = cache_kib * profile
+        if values[:7] != [grant, cache_kib, work, 120, work * 120, 0, profile] or abs(values[7] - 522291) > 2:
+            raise ValueError(f"Adaptive grant/frame test failed: {values}")
     if actual != expected:
         index = next(index for index, pair in enumerate(zip(actual, expected)) if pair[0] != pair[1])
         raise ValueError(f"Screen mismatch at pixel {index}: {actual[index]} != {expected[index]}")
@@ -152,6 +160,7 @@ def main():
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--timing", action="store_true")
     parser.add_argument("--content", action="store_true")
+    parser.add_argument("--adaptive", action="store_true")
     args = parser.parse_args()
     fixtures = args.fixtures.resolve()
     run_root = Path(tempfile.mkdtemp(prefix="visual-", dir=fixtures))
@@ -165,13 +174,20 @@ def main():
     if args.content:
         cases += [("content-64", "content", 0, 80), ("content-128", "content", 0, 80),
                   ("content-tail", "content", 0, 80)]
+    if args.adaptive:
+        cases += [(f"adaptive-{memory}", "adaptive", memory, cpu)
+                  for memory, cpu in ((99, 25), (102, 60), (128, 80))]
+        if args.timing:
+            cases += [(f"adaptive-fast-{memory}", "adaptive", memory, cpu)
+                      for memory, cpu in ((99, 25), (102, 60), (128, 80))]
     for name, mode, memory, cpu in cases:
         case = run_root / name
         case.mkdir()
-        shutil.copyfile(fixtures / ("resources.gba" if mode == "policy" else "ram.gba" if mode == "ram" else f"{name}.gba"), case / "test.gba")
+        rom_name = ("adaptive-fast.gba" if name.startswith("adaptive-fast-") else "adaptive.gba") if mode == "adaptive" else "resources.gba" if mode == "policy" else "ram.gba" if mode == "ram" else f"{name}.gba"
+        shutil.copyfile(fixtures / rom_name, case / "test.gba")
         (case / "config.ini").write_text(
-            f"[ports.cinema]\nskipBios=1\nuseBios=0\ngba.fxMemoryMiB={memory if mode in ('policy', 'ram') else 0}\ngba.fxCPUPercent={cpu}\n"
-            f"[testinfo]\nskip={8192 if mode == 'content' else 2048 if mode == 'ram' else 8}\nframes=1\n", encoding="utf-8")
+            f"[ports.cinema]\nskipBios=1\nuseBios=0\ngba.fxMemoryMiB={memory if mode in ('policy', 'ram', 'adaptive') else 0}\ngba.fxCPUPercent={cpu}\n"
+            f"[testinfo]\nskip={8192 if mode == 'content' else 2048 if mode == 'ram' else 256 if mode == 'adaptive' else 8}\nframes=1\n", encoding="utf-8")
     # Missing references are captured only in a new, ignored directory. They are
     # checked independently below; these images never become compatibility baselines.
     result = subprocess.run([str(args.cinema.resolve()), "-b", str(run_root), "-R", "-v"],

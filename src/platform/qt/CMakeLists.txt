@@ -161,6 +161,9 @@ set(SOURCE_FILES
 	RegisterView.cpp
 	ReportView.cpp
 	ROMInfo.cpp
+	FXResourceInfo.cpp
+	FXResources.cpp
+	FXResourcesController.cpp
 	RotatedHeaderView.cpp
 	SaveConverter.cpp
 	SavestateButton.cpp
@@ -230,6 +233,11 @@ set(TEST_QT_spanset_SRC
 	test/spanset.cpp
 	utils.cpp
 	VFileDevice.cpp)
+
+set(TEST_QT_fx-resources_SRC
+	test/FXResources.cpp
+	FXResourceInfo.cpp
+	FXResources.cpp)
 
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "${CPACK_DEBIAN_PACKAGE_DEPENDS},libqt${QT_V}widgets${QT_V}")
 

@@ -10,6 +10,7 @@
 #include <mgba/internal/gba/io.h>
 
 #include <mgba-util/memory.h>
+#include <mgba-util/crc32.h>
 #include <mgba-util/vfs.h>
 
 #include <fcntl.h>
@@ -23,6 +24,121 @@ struct GBABundledState {
 	struct GBASerializedState* state;
 	struct mStateExtdata* extdata;
 };
+
+size_t GBAFXStateSize(const struct GBA* gba) {
+	return sizeof(struct GBASerializedState) + (gba->fx.active ? GBA_FX_STATE_HEADER_SIZE + gba->fx.ramSize : 0);
+}
+
+static uint32_t _fxStateCRC(const uint8_t* state, size_t size) {
+	size_t offset = sizeof(struct GBASerializedState) + 0x34;
+	uint32_t checksum = crc32(0, state, offset);
+	return crc32(checksum, state + offset + 4, size - offset - 4);
+}
+
+bool GBAFXSerialize(struct GBA* gba, void* state) {
+	if (!gba->fx.active) {
+		GBASerialize(gba, state);
+		return true;
+	}
+	memset(state, 0, GBAFXStateSize(gba));
+	GBASerialize(gba, state);
+	STORE_32(GBA_FX_STATE_MAGIC, 0, state);
+	uint8_t* header = (uint8_t*) state + sizeof(struct GBASerializedState);
+	STORE_32(GBA_FX_STATE_MAGIC, 0, header);
+	STORE_32(GBA_FX_STATE_HEADER_SIZE, 4, header);
+	STORE_32(gba->fx.ramSize, 8, header);
+	STORE_32(gba->fx.requiredFeatures, 0x0C, header);
+	STORE_32(gba->fx.bootSize, 0x10, header);
+	STORE_32(gba->romCrc32, 0x14, header);
+	STORE_32(gba->fx.contentSize, 0x18, header);
+	STORE_32(gba->fx.contentCRC, 0x1C, header);
+	STORE_32(gba->fx.fileCRC, 0x20, header);
+	STORE_32(gba->fx.alu2x ? 2 : 1, 0x24, header);
+	STORE_32(gba->fx.aluPhase, 0x28, header);
+	STORE_32(gba->fx.contentBank, 0x2C, header);
+	STORE_32(gba->fx.invalidBank, 0x30, header);
+	STORE_64LE(gba->fx.acceleratedInstructions, 0x38, header);
+	if (gba->fx.ramSize) {
+		memcpy(header + GBA_FX_STATE_HEADER_SIZE, gba->fx.ram, gba->fx.ramSize);
+	}
+	STORE_32(_fxStateCRC(state, GBAFXStateSize(gba)), 0x34, header);
+	return true;
+}
+
+bool GBAFXDeserialize(struct GBA* gba, const void* state) {
+	if (!gba->fx.active) {
+		return GBADeserialize(gba, state);
+	}
+	uint32_t value;
+	LOAD_32(value, 0, state);
+	if (value != GBA_FX_STATE_MAGIC) {
+		return false;
+	}
+	const uint8_t* header = (const uint8_t*) state + sizeof(struct GBASerializedState);
+	const uint32_t expected[] = {
+		GBA_FX_STATE_MAGIC, GBA_FX_STATE_HEADER_SIZE, gba->fx.ramSize,
+		gba->fx.requiredFeatures, gba->fx.bootSize, gba->romCrc32,
+		gba->fx.contentSize, gba->fx.contentCRC, gba->fx.fileCRC,
+		gba->fx.alu2x ? 2U : 1U
+	};
+	size_t i;
+	for (i = 0; i < sizeof(expected) / sizeof(*expected); ++i) {
+		LOAD_32(value, i * 4, header);
+		if (value != expected[i]) {
+			return false;
+		}
+	}
+	uint32_t phase;
+	uint32_t bank;
+	uint32_t invalid;
+	LOAD_32(phase, 0x28, header);
+	LOAD_32(bank, 0x2C, header);
+	LOAD_32(invalid, 0x30, header);
+	LOAD_32(value, 0x34, header);
+	if (phase > (gba->fx.alu2x ? 1U : 0U) || invalid > 1 ||
+	    (gba->fx.contentSize ? bank > (gba->fx.contentSize - 1) / GBA_FX_CONTENT_WINDOW : bank != 0) ||
+	    value != _fxStateCRC(state, GBAFXStateSize(gba))) {
+		return false;
+	}
+	struct GBASerializedState* base = malloc(sizeof(*base));
+	if (!base) {
+		return false;
+	}
+	memcpy(base, state, sizeof(*base));
+	STORE_32(GBASavestateMagic + GBASavestateVersion, 0, &base->versionMagic);
+	uint32_t pc;
+	uint32_t cpsr;
+	LOAD_32(pc, ARM_PC * 4, base->cpu.gprs);
+	LOAD_32(cpsr, 0, &base->cpu.cpsr.packed);
+	unsigned region = pc >> BASE_OFFSET;
+	unsigned privilege = cpsr & 0x1F;
+	bool validMode = privilege == 0x10 || privilege == 0x11 || privilege == 0x12 ||
+	                 privilege == 0x13 || privilege == 0x17 || privilege == 0x1B || privilege == 0x1F;
+	bool validPC = region == GBA_REGION_BIOS || region == GBA_REGION_EWRAM ||
+	               region == GBA_REGION_IWRAM || region == GBA_REGION_PALETTE_RAM ||
+	               region == GBA_REGION_VRAM || region == GBA_REGION_OAM ||
+	               (region >= GBA_REGION_ROM0 && region <= GBA_REGION_ROM2_EX) ||
+	               (region == (GBA_FX_RAM_BASE >> BASE_OFFSET) && gba->fx.ram);
+	if (region >= GBA_REGION_ROM0 && region <= GBA_REGION_ROM2_EX) {
+		validPC = gba->memory.rom && (pc & (GBA_SIZE_ROM0 - 1)) < gba->memory.romSize;
+	}
+	if (!validMode || !validPC || (pc & ((cpsr & 0x20) ? 1 : 3)) || !GBAValidateState(gba, base)) {
+		free(base);
+		return false;
+	}
+	// Validation finishes before changing RAM or rebuilding the CPU pipeline.
+	if (gba->fx.ramSize) {
+		memcpy(gba->fx.ram, header + GBA_FX_STATE_HEADER_SIZE, gba->fx.ramSize);
+	}
+	GBADeserialize(gba, base);
+	free(base);
+	gba->fx.aluPhase = phase;
+	gba->fx.contentBank = bank;
+	gba->fx.invalidBank = invalid;
+	LOAD_64LE(gba->fx.acceleratedInstructions, 0x38, header);
+	mCALLBACKS_INVOKE(gba, memoryBlocksChanged);
+	return true;
+}
 
 void GBASerialize(struct GBA* gba, struct GBASerializedState* state) {
 	STORE_32(GBASavestateMagic + GBASavestateVersion, 0, &state->versionMagic);
@@ -93,7 +209,7 @@ void GBASerialize(struct GBA* gba, struct GBASerializedState* state) {
 	}
 }
 
-bool GBADeserialize(struct GBA* gba, const struct GBASerializedState* state) {
+bool GBAValidateState(struct GBA* gba, const struct GBASerializedState* state) {
 	bool error = false;
 	int32_t check;
 	uint32_t ucheck;
@@ -156,6 +272,13 @@ bool GBADeserialize(struct GBA* gba, const struct GBASerializedState* state) {
 		error = true;
 	}
 	if (error) {
+		return false;
+	}
+	return true;
+}
+
+bool GBADeserialize(struct GBA* gba, const struct GBASerializedState* state) {
+	if (!GBAValidateState(gba, state)) {
 		return false;
 	}
 	mTimingClear(&gba->timing);

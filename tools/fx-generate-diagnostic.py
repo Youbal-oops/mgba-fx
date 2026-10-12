@@ -8,6 +8,7 @@ import argparse
 from array import array
 import hashlib
 import json
+import re
 from pathlib import Path
 import struct
 import sys
@@ -77,6 +78,9 @@ RAM_FIELDS = (("GUEST RAM MIB", 0), ("WORDS VERIFIED", 0), ("DATA ERRORS", 0),
               ("ARM RESULT", 0), ("THUMB RESULT", 0))
 CONTENT_FIELDS = (("CONTENT BYTES", 0), ("WORDS VERIFIED", 0), ("DATA ERRORS", 0),
                   ("BANKS CHECKED", 0), ("LAST BYTE", 0), ("RAM COPY OK", 0))
+ADAPTIVE_FIELDS = (("GUEST RAM MIB", 0), ("CACHE KIB", 0), ("WORK PER FRAME", 0),
+                   ("SIMULATION TICKS", 0), ("OPTIONAL WORK", 0), ("DATA ERRORS", 0),
+                   ("CPU PROFILE X", 0), ("FRAME TIMER", 0))
 
 
 def draw_text(pixels, text, x, y, scale=1):
@@ -617,7 +621,186 @@ def content_boot(repo_root):
     return bytes(image)
 
 
-def write_content_fixture(path, boot, size):
+def adaptive_boot(repo_root):
+    header = (repo_root / "include/mgba/internal/gba/fx-test.h").read_text(encoding="utf-8")
+    constants = {name: int(value, 0) for name, value in re.findall(r"#define (GBA_FX_TEST_\w+) (0x[0-9A-Fa-f]+|[0-9]+)U", header)}
+    if constants["GBA_FX_TEST_CACHE_DIVISOR"] != 16:
+        raise ValueError("Update the guest cache scaling instructions for this divisor")
+    image = bytearray(policy_image(repo_root)[:-FOOTER_SIZE])
+    image[0xA0:0xAC] = b"ADAPTIVE FX "
+    image[0xAC:0xB0] = b"FX07"
+    image[0xBD] = (-sum(image[0xA0:0xBD]) - 0x19) & 0xFF
+    background = [0x0200] * PIXELS
+    draw_text(background, "GBA FX ADAPTIVE", 30, 8, 2)
+    for index, (label, _) in enumerate(ADAPTIVE_FIELDS):
+        draw_text(background, label, 8, 34 + index * 14)
+    draw_text(background, "SAME GAME DIFFERENT BUDGET", 8, 152)
+    image[0x1000:0x1000 + PIXELS * 2] = struct.pack(f"<{PIXELS}H", *background)
+    boot = ArmProgram(0xC0)
+    boot.literal(1, 0x04000000)
+    boot.literal(2, 0x0403)
+    boot.emit(0xE1C120B0)
+    boot.literal(4, 0x08001000)
+    boot.literal(5, 0x06000000)
+    boot.literal(3, PIXELS)
+    boot.label("background")
+    boot.emit(0xE0D460B2)
+    boot.emit(0xE0C560B2)
+    boot.emit(0xE2533001)
+    boot.branch("background", condition=1)
+    boot.literal(4, 0x08016000)
+    boot.literal(5, 0x03000000)
+    size_literal = len(boot.words)
+    boot.literal(3, 0)
+    boot.label("code")
+    boot.emit(0xE4946004)
+    boot.emit(0xE4856004)
+    boot.emit(0xE2533001)
+    boot.branch("code", condition=1)
+    boot.literal(12, 0x03000000)
+    boot.emit(0xE12FFF1C)
+    emit_decimal(boot)
+    decimal_address = 0x08000000 + boot.origin + boot.labels["decimal"] * 4
+    work = ArmProgram(0x03000000)
+    work.literal(4, 0x040003E0)
+    work.emit(0xE5940000)
+    work.literal(1, MAGIC_VALUE)
+    work.emit(0xE1500001)
+    work.branch("idle", condition=1)
+    work.emit(0xE5940004)
+    work.emit(0xE3500001)
+    work.branch("idle", condition=1)
+    work.emit(0xE5940008)
+    work.emit(0xE2000018)
+    work.emit(0xE3500018)
+    work.branch("idle", condition=1)
+    work.emit(0xE594000C)  # Actual extra RAM MiB, not requested budget.
+    work.emit(0xE3500001)
+    work.branch("idle", condition=3)
+    work.emit(0xE3500010)
+    work.branch("idle", condition=8)
+    work.literal(4, 0x02000004)
+    work.emit(0xE5840000)
+    work.emit(0xE1A03300)  # Cache KiB = RAM MiB << 6 (one sixteenth).
+    work.literal(1, constants["GBA_FX_TEST_CACHE_MAX"] // 1024)
+    work.emit(0xE1530001)
+    work.emit(0x81A03001)
+    work.literal(4, 0x02000008)
+    work.emit(0xE5843000)
+    work.emit(0xE1A0B503)  # Cache bytes = cache KiB << 10.
+    work.emit(0xE1A00A00)  # Actual RAM bytes = RAM MiB << 20.
+    work.literal(1, constants["GBA_FX_TEST_REQUIRED_BYTES"])
+    work.emit(0xE0500001)  # Reserve essential memory before checking the cache.
+    work.branch("idle", condition=3)
+    work.emit(0xE15B0000)
+    work.branch("idle", condition=8)
+    work.emit(0xE24BB004)  # Last aligned cache offset.
+    work.literal(4, 0x040003F4)
+    work.emit(0xE5940000)
+    work.emit(0xE3500001)
+    work.branch("idle", condition=3)
+    work.emit(0xE3500002)
+    work.branch("idle", condition=8)
+    work.literal(4, 0x0200001C)
+    work.emit(0xE5840000)
+    work.emit(0xE00A0093)  # MUL r10, r3, r0: optional work per frame.
+    work.literal(4, 0x0200000C)
+    work.emit(0xE584A000)
+    work.emit(0xE1A03403)  # Cache word count = cache KiB << 8.
+    work.literal(4, constants["GBA_FX_TEST_CONTENT_BASE"])
+    cache_base = constants["GBA_FX_TEST_RAM_BASE"] + constants["GBA_FX_TEST_REQUIRED_BYTES"]
+    work.literal(5, cache_base)
+    work.label("fill_cache")
+    work.emit(0xE4940004)
+    work.emit(0xE4850004)
+    work.emit(0xE2533001)
+    work.branch("fill_cache", condition=1)
+    work.literal(4, 0x04000102)
+    work.emit(0xE3A00081)  # Timer 0, 64 board ticks per count.
+    work.emit(0xE1C400B0)
+    work.literal(4, 0x04000106)
+    work.emit(0xE3A00084)  # Cascaded Timer 1 gives a 32-bit counter.
+    work.emit(0xE1C400B0)
+    work.literal(2, cache_base)
+    work.literal(5, 0x04000006)
+    work.literal(7, 0xA5C39E71)
+    for register in (6, 8, 9, 12):
+        work.emit(0xE3A00000 | (register << 12))
+    work.label("wait_active")
+    work.emit(0xE1D500B0)
+    work.emit(0xE35000A0)
+    work.branch("wait_active", condition=2)
+    work.label("wait_blank")
+    work.emit(0xE1D500B0)
+    work.emit(0xE35000A0)
+    work.branch("wait_blank", condition=3)
+    work.emit(0xE28CC001)
+
+    def timer_read():
+        work.literal(4, 0x04000100)
+        work.emit(0xE1D400B0)
+        work.literal(4, 0x04000104)
+        work.emit(0xE1D410B0)
+        work.emit(0xE1800801)
+
+    work.emit(0xE35C0001)
+    work.branch("start_captured", condition=1)
+    timer_read()
+    work.literal(4, 0x02000024)
+    work.emit(0xE5840000)
+    work.label("start_captured")
+    work.emit(0xE35C0078)
+    work.branch("end_captured", condition=1)
+    timer_read()
+    work.literal(4, 0x02000024)
+    work.emit(0xE5941000)
+    work.emit(0xE0400001)
+    work.literal(4, 0x02000020)
+    work.emit(0xE5840000)
+    work.label("end_captured")
+    work.emit(0xE1A0300A)
+    work.label("optional_work")
+    work.emit(0xE0824006)
+    work.emit(0xE5940000)
+    work.emit(0xE1A01126)  # Cache word index = offset >> 2.
+    work.emit(0xE0211007)
+    work.emit(0xE1500001)
+    work.emit(0x12899001)
+    work.emit(0xE2866004)
+    work.emit(0xE006600B)
+    work.emit(0xE2533001)
+    work.branch("optional_work", condition=1)
+    work.emit(0xE088800A)
+    work.emit(0xE35C0078)
+    work.branch("wait_active", condition=3)
+    for address, register in ((0x02000010, 12), (0x02000014, 8), (0x02000018, 9)):
+        work.literal(4, address)
+        work.emit(0xE5840000 | (register << 12))
+    for index, _ in enumerate(ADAPTIVE_FIELDS):
+        work.literal(4, 0x02000004 + index * 4)
+        work.emit(0xE5940000)
+        work.literal(1, 0x06000000 + ((34 + index * 14) * 240 + 164) * 2)
+        work.literal(12, decimal_address)
+        work.emit(0xE1A0E00F)
+        work.emit(0xE12FFF1C)
+    work.literal(4, 0x02000000)
+    work.emit(0xE3A00001)
+    work.emit(0xE5840000)
+    work.label("idle")
+    work.branch("idle")
+    code = work.finish()
+    boot.literals = [(index, register, len(code) // 4 if index == size_literal else value, condition)
+                     for index, register, value, condition in boot.literals]
+    boot_code = boot.finish()
+    if 0xC0 + len(boot_code) > 0x1000 or len(code) > 0x8000:
+        raise ValueError("Adaptive diagnostic exceeds its code region")
+    image[0xC0:0x1000] = bytes(0x1000 - 0xC0)
+    image[0xC0:0xC0 + len(boot_code)] = boot_code
+    image[0x16000:0x16000 + len(code)] = code
+    return bytes(image)
+
+
+def write_content_fixture(path, boot, size, features=27):
     checksum = 0
     digest = hashlib.sha256()
     with path.open("wb") as output:
@@ -636,7 +819,7 @@ def write_content_fixture(path, boot, size):
             digest.update(block)
             checksum = zlib.crc32(block, checksum)
             offset += count
-        body = struct.pack("<11I", 1, FOOTER_SIZE, 27, 0, len(boot), zlib.crc32(boot),
+        body = struct.pack("<11I", 1, FOOTER_SIZE, features, 0, len(boot), zlib.crc32(boot),
                            1048576, size, checksum, 0, 0)
         footer = body + struct.pack("<I", zlib.crc32(body)) + FOOTER_MAGIC
         output.write(footer)
@@ -650,6 +833,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=repo_root / "build-fx/diagnostics")
     parser.add_argument("--timing", action="store_true", help="Generate opt-in 1x/2x arithmetic diagnostics")
     parser.add_argument("--content", action="store_true", help="Generate 64/128 MiB and non-power-of-two content diagnostics")
+    parser.add_argument("--adaptive", action="store_true", help="Generate the adaptive cache/frame diagnostic")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     boot = boot_image(repo_root)
@@ -670,6 +854,15 @@ def main():
                            ("content-tail", 64 * 1048576 + 7)):
             output = args.output_dir / f"{name}.gba"
             metadata[output.name] = write_content_fixture(output, content_program, size)
+            print(output)
+    if args.adaptive:
+        adaptive_program = adaptive_boot(repo_root)
+        output = args.output_dir / "adaptive.gba"
+        metadata[output.name] = write_content_fixture(output, adaptive_program, 1048576)
+        print(output)
+        if args.timing:
+            output = args.output_dir / "adaptive-fast.gba"
+            metadata[output.name] = write_content_fixture(output, adaptive_program, 1048576, features=31)
             print(output)
     (args.output_dir / "fixtures.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 

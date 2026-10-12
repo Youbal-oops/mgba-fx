@@ -69,6 +69,11 @@ SettingsView::SettingsView(ConfigController* controller, InputController* inputC
 #endif
 
 	reloadConfig();
+	connect(m_ui.fxDefaults, &QAbstractButton::clicked, this, [this]() {
+		m_ui.fxMemoryPercent->setValue(80);
+		m_ui.fxMemoryMiB->setValue(0);
+		m_ui.fxCPUPercent->setValue(80);
+	});
 
 	connect(m_ui.autorunScripts, &QAbstractButton::pressed, this, &SettingsView::openAutorunScripts);
 

@@ -6,6 +6,9 @@ param(
     [switch]$TimingExperiment,
     [switch]$RAMDiagnostic,
     [switch]$ContentPrototype,
+    [switch]$AdaptivePrototype,
+    [switch]$Rewind,
+    [ValidateRange(1, 300)][int]$RewindEntries = 30,
     [ValidateRange(1, 100)][int]$MemoryPercent = 80,
     [ValidateRange(0, 1048576)][int]$MemoryMiB = 0,
     [ValidateRange(1, 100)][int]$CPUPercent = 80
@@ -13,12 +16,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$buildRoot = Join-Path $repoRoot $(if ($ContentPrototype) { 'build-fx/content' } elseif ($TimingExperiment) { 'build-fx/timing' } else { 'build-fx' })
+$buildRoot = Join-Path $repoRoot $(if ($AdaptivePrototype) { 'build-fx/adaptive' } elseif ($ContentPrototype) { 'build-fx/content' } elseif ($TimingExperiment) { 'build-fx/timing' } else { 'build-fx' })
 $qtRoot = Join-Path $repoRoot 'build-tools/qt/6.8.3/mingw_64'
 $compilerBin = Join-Path $repoRoot 'build-tools/qt/Tools/mingw1310_64/bin'
 $depsRoot = Join-Path $repoRoot 'build-tools/deps'
 if (-not $Rom) {
-    $Rom = Join-Path $buildRoot $(if ($ContentPrototype) { 'diagnostics/content-64.gba' } elseif ($RAMDiagnostic) { 'diagnostics/ram.gba' } elseif ($TimingExperiment) { 'diagnostics/timing-2x.gba' } else { 'diagnostics/resources.gba' })
+    $Rom = Join-Path $buildRoot $(if ($AdaptivePrototype) { if ($TimingExperiment) { 'diagnostics/adaptive-fast.gba' } else { 'diagnostics/adaptive.gba' } } elseif ($ContentPrototype) { 'diagnostics/content-64.gba' } elseif ($RAMDiagnostic) { 'diagnostics/ram.gba' } elseif ($TimingExperiment) { 'diagnostics/timing-2x.gba' } else { 'diagnostics/resources.gba' })
 }
 if (-not (Test-Path -LiteralPath (Join-Path $buildRoot 'mGBA.exe')) -or -not (Test-Path -LiteralPath $Rom)) {
     throw 'Build the emulator and generate the diagnostics with tools/fx-build.ps1 first.'
@@ -31,10 +34,13 @@ try {
     $env:QT_PLUGIN_PATH = Join-Path $qtRoot 'plugins'
     $env:QT_QPA_PLATFORM = 'windows'
     $arguments = @('-C', 'skipBios=1', '-C', 'useBios=0')
-    if ($TimingExperiment -or $RAMDiagnostic -or $ContentPrototype) {
+    if ($TimingExperiment -or $RAMDiagnostic -or $ContentPrototype -or $AdaptivePrototype) {
         $arguments += @('-C', 'rewindEnable=0')
     }
-    if ($RAMDiagnostic -or $ContentPrototype) {
+    if ($Rewind) {
+        $arguments += @('-C', 'rewindEnable=1', '-C', "rewindBufferCapacity=$RewindEntries")
+    }
+    if ($RAMDiagnostic -or $ContentPrototype -or $AdaptivePrototype) {
         $arguments += @('-C', 'audioSync=0', '-C', 'videoSync=1', '-C', 'hwaccelVideo=0')
     }
     if ($PSBoundParameters.ContainsKey('MemoryPercent')) {

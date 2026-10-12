@@ -1011,7 +1011,13 @@ size_t retro_serialize_size(void) {
 		_doDeferredSetup();
 	}
 	struct VFile* vfm = VFileMemChunk(NULL, 0);
-	mCoreSaveStateNamed(core, vfm, SAVESTATE_SAVEDATA | SAVESTATE_RTC);
+	if (!vfm) {
+		return 0;
+	}
+	if (!mCoreSaveStateNamed(core, vfm, SAVESTATE_SAVEDATA | SAVESTATE_RTC)) {
+		vfm->close(vfm);
+		return 0;
+	}
 	size_t size = vfm->size(vfm);
 	vfm->close(vfm);
 	return size;
@@ -1022,7 +1028,13 @@ bool retro_serialize(void* data, size_t size) {
 		_doDeferredSetup();
 	}
 	struct VFile* vfm = VFileMemChunk(NULL, 0);
-	mCoreSaveStateNamed(core, vfm, SAVESTATE_SAVEDATA | SAVESTATE_RTC);
+	if (!vfm) {
+		return false;
+	}
+	if (!mCoreSaveStateNamed(core, vfm, SAVESTATE_SAVEDATA | SAVESTATE_RTC)) {
+		vfm->close(vfm);
+		return false;
+	}
 	if ((ssize_t) size > vfm->size(vfm)) {
 		size = vfm->size(vfm);
 	} else if ((ssize_t) size < vfm->size(vfm)) {
@@ -1040,6 +1052,9 @@ bool retro_unserialize(const void* data, size_t size) {
 		_doDeferredSetup();
 	}
 	struct VFile* vfm = VFileFromConstMemory(data, size);
+	if (!vfm) {
+		return false;
+	}
 	bool success = mCoreLoadStateNamed(core, vfm, SAVESTATE_RTC);
 	vfm->close(vfm);
 	return success;

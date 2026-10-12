@@ -39,6 +39,7 @@ void mCoreRewindContextInit(struct mCoreRewindContext*, size_t entries, bool onT
 void mCoreRewindContextDeinit(struct mCoreRewindContext*);
 
 struct mCore;
+size_t mCoreRewindCapacity(struct mCore*, size_t requested);
 void mCoreRewindAppend(struct mCoreRewindContext*, struct mCore*);
 bool mCoreRewindRestore(struct mCoreRewindContext*, struct mCore*, unsigned count);
 

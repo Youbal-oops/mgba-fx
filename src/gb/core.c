@@ -1225,6 +1225,10 @@ static size_t _GBCoreSavedataClone(struct mCore* core, void** sram) {
 	}
 
 	view = malloc(size);
+	if (!view) {
+		*sram = NULL;
+		return 0;
+	}
 	if (sramSize) {
 		memcpy(view, gb->memory.sram, gb->sramSize);
 	}

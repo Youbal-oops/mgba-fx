@@ -59,6 +59,7 @@
 #include "PrinterView.h"
 #include "ReportView.h"
 #include "ROMInfo.h"
+#include "FXResources.h"
 #include "SaveConverter.h"
 #ifdef ENABLE_SCRIPTING
 #include "scripting/ScriptingView.h"
@@ -151,7 +152,7 @@ Window::Window(CoreManager* manager, ConfigController* config, int playerId, QWi
 		VFile* output = m_libraryView->selectedVFile();
 		if (output) {
 			QPair<QString, QString> path = m_libraryView->selectedPath();
-			setController(m_manager->loadGame(output, path.second, path.first));
+			setController(m_manager->loadGame(output, path.second, path.first, m_controller.get()));
 		}
 	});
 #endif
@@ -253,7 +254,7 @@ void Window::argumentsPassed() {
 	}
 
 	if (args->fname) {
-		setController(m_manager->loadGame(args->fname));
+		setController(m_manager->loadGame(args->fname, m_controller.get()));
 	}
 
 	if (m_config->graphicsOpts()->fullscreen) {
@@ -376,7 +377,7 @@ QString Window::getFiltersArchive() const {
 void Window::selectROM() {
 	QString filename = GBAApp::app()->getOpenFileName(this, tr("Select ROM"), romFilters(true));
 	if (!filename.isEmpty()) {
-		setController(m_manager->loadGame(filename));
+		setController(m_manager->loadGame(filename, m_controller.get()));
 	}
 }
 
@@ -399,7 +400,7 @@ void Window::selectROMInArchive() {
 		VFile* output = archiveInspector->selectedVFile();
 		QPair<QString, QString> path = archiveInspector->selectedPath();
 		if (output) {
-			setController(m_manager->loadGame(output, path.second, path.first));
+			setController(m_manager->loadGame(output, path.second, path.first, m_controller.get()));
 		}
 		archiveInspector->close();
 	});
@@ -866,7 +867,7 @@ void Window::dropEvent(QDropEvent* event) {
 		return;
 	}
 	event->accept();
-	setController(m_manager->loadGame(url.toLocalFile()));
+	setController(m_manager->loadGame(url.toLocalFile(), m_controller.get()));
 }
 
 #ifndef Q_OS_MAC
@@ -1412,6 +1413,7 @@ void Window::setupMenu(QMenuBar* menubar) {
 #endif
 
 	addGameAction(tr("ROM &info..."), "romInfo", openControllerTView<ROMInfo>(), "file");
+	addGameAction(tr("Game resources..."), "gameResources", openControllerTView<FXResources>(), "file");
 
 	m_actions.addMenu(tr("Recent"), "mru", "file");
 	m_actions.addSeparator("file");
@@ -2102,7 +2104,7 @@ void Window::updateMRU() {
 	for (const QString& file : m_mruFiles) {
 		QString displayName(QDir::toNativeSeparators(file).replace("&", "&&"));
 		m_actions.addAction(displayName, QString("mru.%1").arg(QString::number(i)), [this, file]() {
-			setController(m_manager->loadGame(file));
+			setController(m_manager->loadGame(file, m_controller.get()));
 		}, "mru", QString("Ctrl+%1").arg(i));
 		++i;
 	}

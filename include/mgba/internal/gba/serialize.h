@@ -498,7 +498,13 @@ static_assert(sizeof(struct GBASerializedState) == 0x61000, "GBA savestate struc
 struct VDir;
 
 void GBASerialize(struct GBA* gba, struct GBASerializedState* state);
+#define GBA_FX_STATE_MAGIC 0x02000001
+#define GBA_FX_STATE_HEADER_SIZE 64
 bool GBADeserialize(struct GBA* gba, const struct GBASerializedState* state);
+bool GBAValidateState(struct GBA* gba, const struct GBASerializedState* state);
+size_t GBAFXStateSize(const struct GBA* gba);
+bool GBAFXSerialize(struct GBA* gba, void* state);
+bool GBAFXDeserialize(struct GBA* gba, const void* state);
 
 CXX_GUARD_END
 

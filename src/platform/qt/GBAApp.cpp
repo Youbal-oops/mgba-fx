@@ -124,7 +124,7 @@ void GBAApp::cleanup() {
 
 bool GBAApp::event(QEvent* event) {
 	if (event->type() == QEvent::FileOpen) {
-		CoreController* core = m_manager.loadGame(static_cast<QFileOpenEvent*>(event)->file());
+		CoreController* core = m_manager.loadGame(static_cast<QFileOpenEvent*>(event)->file(), m_windows[0]->controller().get());
 		m_windows[0]->setController(core);
 		return true;
 	}
@@ -417,7 +417,7 @@ void GBAApp::initMultiplayer() {
 		if (!w) {
 			break;
 		}
-		CoreController* core = m_manager.loadGame(fname);
+		CoreController* core = m_manager.loadGame(fname, w->controller().get());
 		w->setController(core);
 		w = nullptr;
 	}

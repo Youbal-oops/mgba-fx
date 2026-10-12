@@ -17,6 +17,7 @@
 
 #ifdef M_CORE_GBA
 #include <mgba/gba/core.h>
+#include <mgba/internal/gba/fx.h>
 #endif
 
 #include <mgba/core/core.h>
@@ -35,7 +36,7 @@ void CoreManager::setMultiplayerController(MultiplayerController* multiplayer) {
 	m_multiplayer = multiplayer;
 }
 
-CoreController* CoreManager::loadGame(const QString& path) {
+CoreController* CoreManager::loadGame(const QString& path, CoreController* replacement) {
 	QFileInfo info(path);
 	if (!info.isReadable()) {
 		// Open specific file in archive
@@ -53,7 +54,7 @@ CoreController* CoreManager::loadGame(const QString& path) {
 				vf = vfclone;
 			}
 			dir->close(dir);
-			return loadGame(vf, fname, base);
+			return loadGame(vf, fname, base, replacement);
 		} else {
 			LOG(QT, ERROR) << tr("Failed to open game file: %1").arg(path);
 		}
@@ -107,15 +108,15 @@ CoreController* CoreManager::loadGame(const QString& path) {
 			                             "*." + info.suffix());
 			if (!newPath.isEmpty()) {
 				vf->close(vf);
-				return loadGame(newPath);
+				return loadGame(newPath, replacement);
 			}
 		}
 	}
 
-	return loadGame(vf, info.fileName(), dir.canonicalPath());
+	return loadGame(vf, info.fileName(), dir.canonicalPath(), replacement);
 }
 
-CoreController* CoreManager::loadGame(VFile* vf, const QString& path, const QString& base) {
+CoreController* CoreManager::loadGame(VFile* vf, const QString& path, const QString& base, CoreController* replacement) {
 	if (!vf) {
 		return nullptr;
 	}
@@ -128,12 +129,22 @@ CoreController* CoreManager::loadGame(VFile* vf, const QString& path, const QStr
 	}
 
 	core->init(core);
+	CoreController::Interrupter interrupter(replacement);
+#ifdef M_CORE_GBA
+	if (replacement && core->platform(core) == mPLATFORM_GBA && replacement->platform() == mPLATFORM_GBA) {
+		mHostResourceSetMemoryReplacement(core->board, replacement->thread()->core->board);
+	}
+#endif
 	mCoreInitConfig(core, nullptr);
 
 	if (m_config) {
 		mCoreLoadForeignConfig(core, m_config);
 	}
 
+	bool enhancedCandidate = false;
+#ifdef M_CORE_GBA
+	enhancedCandidate = core->platform(core) == mPLATFORM_GBA && GBAFXHasFooter(vf);
+#endif
 	bool loaded;
 	if (m_preload) {
 		loaded = mCorePreloadVF(core, vf);
@@ -144,11 +155,20 @@ CoreController* CoreManager::loadGame(VFile* vf, const QString& path, const QStr
 		}
 	}
 	if (!loaded) {
-		LOG(QT, ERROR) << tr("Could not load game. Check the ROM format and resource settings.");
+		if (enhancedCandidate) {
+			LOG(QT, ERROR) << tr("Could not load enhanced game. Tools > View logs shows the specific format or resource failure. Check Settings > Enhancements and other enhanced windows, then reopen the game.");
+		} else {
+			LOG(QT, ERROR) << tr("Could not load game. Check the ROM format and resource settings.");
+		}
 		mCoreConfigDeinit(&core->config);
 		core->deinit(core);
 		return nullptr;
 	}
+#ifdef M_CORE_GBA
+	if (core->platform(core) == mPLATFORM_GBA) {
+		mHostResourceSetMemoryReplacement(core->board, nullptr);
+	}
+#endif
 
 	QByteArray bytes(path.toUtf8());
 	separatePath(bytes.constData(), nullptr, core->dirs.baseName, nullptr);
@@ -167,7 +187,7 @@ CoreController* CoreManager::loadGame(VFile* vf, const QString& path, const QStr
 		if (!newPath.isEmpty()) {
 			mCoreConfigDeinit(&core->config);
 			core->deinit(core);
-			return loadGame(newPath);
+			return loadGame(newPath, replacement);
 		}
 	}
 	mCoreAutoloadCheats(core);

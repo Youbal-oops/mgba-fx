@@ -224,6 +224,10 @@ void GBAFXRAMDeinit(struct GBAFXState* state) {
 }
 
 void GBAFXDeinit(struct GBAFXState* state, struct VFile* vf) {
+	if (state->budgetOwner) {
+		mHostResourceReleaseMemory(state->budgetOwner);
+		state->budgetOwner = 0;
+	}
 	if (state->contentMapping) {
 		vf->unmap(vf, state->contentMapping, (size_t) state->bootSize + state->contentSize + GBA_FX_FOOTER_SIZE);
 	}

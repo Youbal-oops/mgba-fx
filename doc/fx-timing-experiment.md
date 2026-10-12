@@ -16,8 +16,9 @@ The experiment builds into ignored `build-fx/timing/`, keeping the previous
 desktop build intact. The two timing ROMs display the arithmetic profile and
 the number of additions completed during the measured portion of each frame.
 Their screen rendering and VCOUNT polling also consume time. The launch script
-disables rewind for the experiment session; experimental state saving/loading
-is rejected before state data is written or applied.
+keeps rewind off by default. The [state prototype](fx-state-prototype.md)
+now preserves the arithmetic profile and fractional remainder; use `-Rewind`
+to request budgeted history.
 
 The desktop 2x demo was opened and confirmed running with the window title
 `mGBA - FX ALU 2X`. Its stdout/stderr logs are in `build-fx/milestone-3/`.
@@ -131,9 +132,8 @@ between unchanged peripheral events. It does not prove a general two-clock CPU
 model, faster memory or multiplication, execution from expanded RAM, dynamic
 host calibration, a maximum reliable profile, or long-run game compatibility.
 Full BIOS/bus timing and breakpoint behavior need broader coverage before
-extending the eligible instruction set. State serialization and rewind need a
-format that preserves the profile and fractional remainder before support is
-enabled.
+extending the eligible instruction set. State serialization and bounded rewind are covered separately by the
+[state prototype](fx-state-prototype.md).
 
 The original resource/timing fixtures still request zero extra guest RAM.
 The separate [RAM prototype](fx-ram-prototype.md) now allocates extra RAM

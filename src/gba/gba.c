@@ -473,6 +473,12 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 				mLOG(GBA, WARN, "Invalid GBA-FX resource settings or insufficient memory budget");
 				return false;
 			}
+			uint64_t available = host.availableBytes < host.addressBytes ? host.availableBytes : host.addressBytes;
+			if (!mHostResourceClaimMemory(gba, fx.budget.limitBytes, available)) {
+				mLOG(GBA, WARN, "GBA-FX memory budget conflicts with another instance; lower the memory limits or close another enhanced game");
+				return false;
+			}
+			fx.budgetOwner = gba;
 		} else if (fx.requiredFeatures & (GBA_FX_FEATURE_POLICY | GBA_FX_FEATURE_RAM | GBA_FX_FEATURE_CONTENT)) {
 			mLOG(GBA, WARN, "GBA-FX host resource policy is unavailable on this platform");
 			return false;
@@ -481,6 +487,7 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 	if (fx.contentSize) {
 		uint64_t mappingSize = (uint64_t) fx.bootSize + fx.contentSize + GBA_FX_FOOTER_SIZE;
 		if (mappingSize > fx.budget.headroomBytes) {
+			GBAFXDeinit(&fx, vf);
 			mLOG(GBA, WARN, "GBA-FX content mapping exceeds remaining memory budget");
 			return false;
 		}
@@ -490,6 +497,7 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 	if (fx.requiredFeatures & GBA_FX_FEATURE_RAM) {
 		fx.ramSize = GBAFXRAMGrant(&fx.budget, fx.minimumRAM);
 		if (!fx.ramSize) {
+			GBAFXDeinit(&fx, vf);
 			mLOG(GBA, WARN, "GBA-FX needs at least %u bytes of guest RAM; budget headroom is %llu bytes",
 			     fx.minimumRAM, (unsigned long long) fx.budget.headroomBytes);
 			return false;
@@ -497,6 +505,7 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 		fx.ram = anonymousMemoryMap(fx.ramSize);
 		if (!fx.ram) {
 			mLOG(GBA, WARN, "Could not allocate GBA-FX guest RAM (%u bytes)", fx.ramSize);
+			GBAFXDeinit(&fx, vf);
 			return false;
 		}
 		fx.budget.reservedBytes += fx.ramSize;

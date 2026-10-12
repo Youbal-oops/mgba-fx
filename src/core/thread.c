@@ -146,7 +146,7 @@ void _frameStarted(void* context) {
 	if (!thread) {
 		return;
 	}
-	if (thread->core->opts.rewindEnable && thread->core->opts.rewindBufferCapacity > 0) {
+	if (thread->core->opts.rewindEnable && thread->impl->rewind.currentState) {
 		MutexLock(&thread->impl->stateMutex);
 		if (thread->impl->rewinding) {
 			if (!mCoreRewindRestore(&thread->impl->rewind, thread->core, 1)) {
@@ -154,6 +154,15 @@ void _frameStarted(void* context) {
 			}
 		} else {
 			if (thread->impl->rewind.rewindFrameCounter == 0) {
+				size_t entries = mCoreRewindPatchesSize(&thread->impl->rewind.patchMemory);
+				size_t capacity = mCoreRewindCapacity(thread->core, entries);
+				if (capacity < entries) {
+					mLOG(STATUS, INFO, "Rewind history reclaimed under memory pressure: %zu entries", capacity);
+					mCoreRewindContextDeinit(&thread->impl->rewind);
+					if (capacity) {
+						mCoreRewindContextInit(&thread->impl->rewind, capacity, true);
+					}
+				}
 				mCoreRewindAppend(&thread->impl->rewind, thread->core);
 				thread->impl->rewind.rewindFrameCounter = thread->core->opts.rewindBufferInterval;
 			}
@@ -692,8 +701,16 @@ void mCoreThreadSetRewinding(struct mCoreThread* threadContext, bool rewinding) 
 
 void mCoreThreadRewindParamsChanged(struct mCoreThread* threadContext) {
 	struct mCore* core = threadContext->core;
-	if (core->opts.rewindEnable && core->opts.rewindBufferCapacity > 0) {
-		 mCoreRewindContextInit(&threadContext->impl->rewind, core->opts.rewindBufferCapacity, true);
+	size_t requested = core->opts.rewindBufferCapacity > 0 ? core->opts.rewindBufferCapacity : 0;
+	size_t capacity = mCoreRewindCapacity(core, requested);
+	if (core->opts.rewindEnable && capacity < requested) {
+		mLOG(STATUS, INFO, "Rewind capacity limited by memory budget: %zu of %zu entries", capacity, requested);
+	}
+	if (core->opts.rewindEnable && capacity) {
+		if (threadContext->impl->rewind.currentState && mCoreRewindPatchesSize(&threadContext->impl->rewind.patchMemory) != capacity) {
+			mCoreRewindContextDeinit(&threadContext->impl->rewind);
+		}
+		 mCoreRewindContextInit(&threadContext->impl->rewind, capacity, true);
 	} else {
 		 mCoreRewindContextDeinit(&threadContext->impl->rewind);
 	}

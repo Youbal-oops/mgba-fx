@@ -65,7 +65,7 @@ The diagnostic program checks the magic and interface version, stores its detect
 
 Detection state belongs to the loaded GBA instance. It survives a soft reset of that game and is cleared on unload, normal-ROM load, failed load, or a switch to another supported loading mode. Two emulator instances must not share detection state.
 
-Detection, host budget queries, bounded extra RAM, and a read-only banked content prototype are implemented. General enhanced CPU capacity and extension save-state support remain future work. See [fx-content-prototype.md](fx-content-prototype.md) for the content transport. See [fx-ram-prototype.md](fx-ram-prototype.md) for the memory contract and demonstration. Required unknown features are rejected; optional unknown features do not appear in the supported feature mask.
+Detection, host budget queries, bounded extra RAM, read-only banked content, and enhanced save states are implemented as prototypes. General enhanced CPU capacity remains future work. See [fx-state-prototype.md](fx-state-prototype.md) for persistence, [fx-content-prototype.md](fx-content-prototype.md) for content, and [fx-ram-prototype.md](fx-ram-prototype.md) for RAM. Required unknown features are rejected; optional unknown features do not appear in the supported feature mask.
 
 An explicitly enabled experimental build also accepts required feature bit 2
 and reports it for games that activate the limited arithmetic profile. Default

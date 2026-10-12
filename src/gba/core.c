@@ -633,7 +633,7 @@ static void _GBACoreSetAVStream(struct mCore* core, struct mAVStream* stream) {
 static bool _GBACoreLoadROM(struct mCore* core, struct VFile* vf) {
 	struct GBACore* gbacore = (struct GBACore*) core;
 	struct GBA* gba = core->board;
-	if (gba->fx.ram || gba->fx.content) {
+	if (gba->fx.active || gba->fx.ram || gba->fx.content) {
 		GBAUnloadROM(gba);
 	}
 	mHostResourceRequestCPU(gba, 0);
@@ -919,27 +919,20 @@ static void _GBACoreStep(struct mCore* core) {
 }
 
 static size_t _GBACoreStateSize(struct mCore* core) {
-	UNUSED(core);
-	return sizeof(struct GBASerializedState);
+	return GBAFXStateSize(core->board);
 }
 
 static bool _GBACoreLoadState(struct mCore* core, const void* state) {
+	bool loaded = GBAFXDeserialize(core->board, state);
 	const struct GBA* gba = core->board;
-	if (gba->fx.alu2x || gba->fx.ram || gba->fx.content) {
-		mLOG(GBA, WARN, "Save states are unavailable for the GBA-FX timing/RAM/content prototype");
-		return false;
+	if (!loaded && gba->fx.active) {
+		mLOG(GBA, WARN, "GBA-FX state is damaged or incompatible; reopen the same ROM with the saved RAM grant and CPU profile");
 	}
-	return GBADeserialize(core->board, state);
+	return loaded;
 }
 
 static bool _GBACoreSaveState(struct mCore* core, void* state) {
-	const struct GBA* gba = core->board;
-	if (gba->fx.alu2x || gba->fx.ram || gba->fx.content) {
-		mLOG(GBA, WARN, "Save states are unavailable for the GBA-FX timing/RAM/content prototype");
-		return false;
-	}
-	GBASerialize(core->board, state);
-	return true;
+	return GBAFXSerialize(core->board, state);
 }
 
 static bool _GBACoreLoadExtraState(struct mCore* core, const struct mStateExtdata* extdata) {
@@ -985,6 +978,10 @@ static bool _GBACoreSaveExtraState(struct mCore* core, struct mStateExtdata* ext
 		struct mStateExtdataItem item;
 		item.size = size + sizeof(uint32_t);
 		item.data = malloc(item.size);
+		if (!item.data) {
+			free(buffer);
+			return false;
+		}
 		item.clean = free;
 		uint32_t type = gba->video.renderer->rendererId(gba->video.renderer);
 		STORE_32(type, 0, item.data);
@@ -1003,6 +1000,10 @@ static bool _GBACoreSaveExtraState(struct mCore* core, struct mStateExtdata* ext
 			struct mStateExtdataItem item;
 			item.size = size + sizeof(uint32_t);
 			item.data = malloc(item.size);
+			if (!item.data) {
+				free(buffer);
+				return false;
+			}
 			item.clean = free;
 			uint32_t type = gba->sio.driver->driverId(gba->sio.driver);
 			STORE_32(type, 0, item.data);
@@ -1555,6 +1556,9 @@ static size_t _GBACoreSavedataClone(struct mCore* core, void** sram) {
 		return 0;
 	}
 	*sram = malloc(size);
+	if (!*sram) {
+		return 0;
+	}
 	struct VFile* vf = VFileFromMemory(*sram, size);
 	if (!vf) {
 		free(*sram);
