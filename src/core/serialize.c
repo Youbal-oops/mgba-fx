@@ -159,7 +159,10 @@ static bool _savePNGState(struct mCore* core, struct VFile* vf, struct mStateExt
 	if (!state) {
 		return false;
 	}
-	core->saveState(core, state);
+	if (!core->saveState(core, state)) {
+		mappedMemoryFree(state, stateSize);
+		return false;
+	}
 
 	uLongf len = compressBound(stateSize);
 	void* buffer = malloc(len);
@@ -470,16 +473,29 @@ bool mCoreSaveStateNamed(struct mCore* core, struct VFile* vf, int flags) {
 
 	if (!pixels) {
 #endif
-		vf->truncate(vf, stateSize);
-		void* state = vf->map(vf, stateSize, MAP_WRITE);
-		if (!state) {
+		void* snapshot = anonymousMemoryMap(stateSize);
+		if (!snapshot || !core->saveState(core, snapshot)) {
+			if (snapshot) {
+				mappedMemoryFree(snapshot, stateSize);
+			}
 			mStateExtdataDeinit(&extdata);
 			if (cheatVf) {
 				cheatVf->close(cheatVf);
 			}
 			return false;
 		}
-		core->saveState(core, state);
+		vf->truncate(vf, stateSize);
+		void* state = vf->map(vf, stateSize, MAP_WRITE);
+		if (!state) {
+			mappedMemoryFree(snapshot, stateSize);
+			mStateExtdataDeinit(&extdata);
+			if (cheatVf) {
+				cheatVf->close(cheatVf);
+			}
+			return false;
+		}
+		memcpy(state, snapshot, stateSize);
+		mappedMemoryFree(snapshot, stateSize);
 		vf->unmap(vf, state, stateSize);
 		vf->seek(vf, stateSize, SEEK_SET);
 		mStateExtdataSerialize(&extdata, vf);
@@ -544,6 +560,10 @@ bool mCoreLoadStateNamed(struct mCore* core, struct VFile* vf, int flags) {
 	}
 	bool success = core->loadState(core, state);
 	mappedMemoryFree(state, core->stateSize(core));
+	if (!success) {
+		mStateExtdataDeinit(&extdata);
+		return false;
+	}
 
 	core->loadExtraState(core, &extdata);
 

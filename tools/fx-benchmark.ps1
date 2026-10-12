@@ -4,6 +4,7 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory = 'build-fx/baseline',
+    [string]$BuildDirectory = 'build-fx',
     [ValidateRange(1, 1000000)][int]$Frames = 600,
     [ValidateRange(1, 20)][int]$Runs = 3
 )
@@ -13,7 +14,11 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $oldPath = $env:PATH
 try {
     Push-Location $repoRoot
-    $env:PATH = "$repoRoot/build-fx;$repoRoot/build-tools/qt/Tools/mingw1310_64/bin;$repoRoot/build-tools/deps/bin;$repoRoot/build-tools/deps/mingw64/bin;$env:PATH"
+    $buildRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot $BuildDirectory))
+    if (-not $buildRoot.StartsWith($repoRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Benchmark binaries must be inside the repository.'
+    }
+    $env:PATH = "$buildRoot;$repoRoot/build-tools/qt/Tools/mingw1310_64/bin;$repoRoot/build-tools/deps/bin;$repoRoot/build-tools/deps/mingw64/bin;$env:PATH"
     $outputRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot $OutputDirectory))
     if (-not $outputRoot.StartsWith($repoRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Benchmark output must be inside the repository.'
@@ -31,7 +36,7 @@ try {
             $stdout = Join-Path $outputRoot "$caseName-$run.csv"
             $stderr = Join-Path $outputRoot "$caseName-$run.stderr.log"
             $timer = [Diagnostics.Stopwatch]::StartNew()
-            $process = Start-Process -FilePath (Join-Path $repoRoot 'build-fx/mgba-perf.exe') -ArgumentList @('-P', '-F', "$Frames", $rom) -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            $process = Start-Process -FilePath (Join-Path $buildRoot 'mgba-perf.exe') -ArgumentList @('-P', '-F', "$Frames", $rom) -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
             # Retain the handle so Windows PowerShell can read a short-lived exit code.
             $processHandle = $process.Handle
             $sampledPeak = 0L
@@ -67,7 +72,7 @@ try {
     $report = [ordered]@{
         timestampUtc = [DateTime]::UtcNow.ToString('o')
         startingCommit = (& git rev-parse HEAD)
-        coreDllSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath 'build-fx/libmgba.dll').Hash
+        coreDllSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $buildRoot 'libmgba.dll')).Hash
         configuration = 'RelWithDebInfo, GCC 13.1, LTO OFF, software renderer'
         host = @{ cpu = $cpu.Name; logicalProcessors = $machine.NumberOfLogicalProcessors; physicalMemoryBytes = $machine.TotalPhysicalMemory }
         memorySamplingIntervalMs = 20

@@ -15,6 +15,7 @@ set(SOURCE_FILES
 	core.c
 	dma.c
 	fx.c
+	fx-policy.c
 	gba.c
 	hle-bios.c
 	input.c

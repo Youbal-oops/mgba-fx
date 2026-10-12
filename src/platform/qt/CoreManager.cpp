@@ -134,10 +134,20 @@ CoreController* CoreManager::loadGame(VFile* vf, const QString& path, const QStr
 		mCoreLoadForeignConfig(core, m_config);
 	}
 
+	bool loaded;
 	if (m_preload) {
-		mCorePreloadVF(core, vf);
+		loaded = mCorePreloadVF(core, vf);
 	} else {
-		core->loadROM(core, vf);
+		loaded = core->loadROM(core, vf);
+		if (!loaded) {
+			vf->close(vf);
+		}
+	}
+	if (!loaded) {
+		LOG(QT, ERROR) << tr("Could not load game. Check the ROM format and resource settings.");
+		mCoreConfigDeinit(&core->config);
+		core->deinit(core);
+		return nullptr;
 	}
 
 	QByteArray bytes(path.toUtf8());

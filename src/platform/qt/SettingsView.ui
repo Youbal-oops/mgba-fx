@@ -1426,6 +1426,94 @@
          </layout>
         </widget>
        </item>
+       <item row="2" column="0" colspan="2">
+        <widget class="QGroupBox" name="fxResources">
+         <property name="title">
+          <string>GBA-FX development resources</string>
+         </property>
+         <layout class="QFormLayout" name="fxResourcesLayout">
+          <item row="0" column="0">
+           <widget class="QLabel" name="fxMemoryPercentLabel">
+            <property name="text">
+             <string>Available RAM budget:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QSpinBox" name="fxMemoryPercent">
+            <property name="minimum">
+             <number>1</number>
+            </property>
+            <property name="maximum">
+             <number>100</number>
+            </property>
+            <property name="value">
+             <number>80</number>
+            </property>
+            <property name="suffix">
+             <string> %</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="fxMemoryMiBLabel">
+            <property name="text">
+             <string>RAM budget override (MiB):</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QSpinBox" name="fxMemoryMiB">
+            <property name="minimum">
+             <number>0</number>
+            </property>
+            <property name="maximum">
+             <number>1048576</number>
+            </property>
+            <property name="value">
+             <number>0</number>
+            </property>
+            <property name="specialValueText">
+             <string>Use percentage</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="fxCPUPercentLabel">
+            <property name="text">
+             <string>Host CPU limit:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QSpinBox" name="fxCPUPercent">
+            <property name="minimum">
+             <number>1</number>
+            </property>
+            <property name="maximum">
+             <number>100</number>
+            </property>
+            <property name="value">
+             <number>80</number>
+            </property>
+            <property name="suffix">
+             <string> %</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="0" colspan="2">
+           <widget class="QLabel" name="fxResourceDescription">
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+            <property name="text">
+              <string>Reopen an enhanced game to apply changes. Marked RAM prototypes can receive up to 16 MiB of extra guest RAM within this budget. Windows enforces the CPU limit when available. Games report the actual grant and whether the limit is active. Ordinary games use their usual behavior.</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
       </layout>
      </widget>
      <widget class="QWidget" name="bios">

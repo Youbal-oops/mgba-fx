@@ -210,6 +210,11 @@ void ARMRaiseUndefined(struct ARMCore*);
 
 void ARMRun(struct ARMCore* cpu);
 void ARMRunLoop(struct ARMCore* cpu);
+#ifdef GBA_FX_TIMING_EXPERIMENT
+/* Accelerate selected arithmetic only in the caller's zero-wait execution region. */
+void ARMRunALU2x(struct ARMCore* cpu, uint32_t base, uint32_t mask, uint8_t* phase, uint64_t* instructions);
+void ARMRunLoopALU2x(struct ARMCore* cpu, uint32_t base, uint32_t mask, uint8_t* phase, uint64_t* instructions);
+#endif
 void ARMRunFake(struct ARMCore* cpu, uint32_t opcode);
 
 CXX_GUARD_END

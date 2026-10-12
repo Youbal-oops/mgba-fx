@@ -128,6 +128,7 @@ struct GBA {
 	GBADebugFlags debugFlags;
 
 	struct GBAFXState fx;
+	struct GBAFXPolicy fxPolicy;
 };
 
 struct GBACartridge {

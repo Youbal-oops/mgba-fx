@@ -71,6 +71,8 @@ void GBACreate(struct GBA* gba) {
 
 static void GBAInit(void* cpu, struct mCPUComponent* component) {
 	struct GBA* gba = (struct GBA*) component;
+	GBAFXPolicyDefaults(&gba->fxPolicy);
+	mHostResourceRegister(gba);
 	memset(&gba->fx, 0, sizeof(gba->fx));
 	gba->cpu = cpu;
 	gba->debugger = 0;
@@ -139,6 +141,12 @@ static void GBAInit(void* cpu, struct mCPUComponent* component) {
 }
 
 void GBAUnloadROM(struct GBA* gba) {
+	mHostResourceRequestCPU(gba, 0);
+	if (gba->fx.ram && gba->cpu->memory.activeRegion == gba->fx.ram) {
+		gba->memory.activeRegion = -1;
+		gba->cpu->memory.setActiveRegion(gba->cpu, GBA_BASE_BIOS);
+	}
+	GBAFXRAMDeinit(&gba->fx);
 	memset(&gba->fx, 0, sizeof(gba->fx));
 	GBAMemoryClearAGBPrint(gba);
 	if (gba->memory.unl.type) {
@@ -181,6 +189,7 @@ void GBAUnloadROM(struct GBA* gba) {
 
 void GBADestroy(struct GBA* gba) {
 	GBAUnloadROM(gba);
+	mHostResourceUnregister(gba);
 	GBAUnloadMB(gba);
 
 	if (gba->biosVf) {
@@ -234,6 +243,9 @@ void GBAInterruptHandlerInit(struct ARMInterruptHandler* irqh) {
 }
 
 void GBAReset(struct ARMCore* cpu) {
+	struct GBA* gba = (struct GBA*) cpu->master;
+	gba->fx.aluPhase = 0;
+	gba->fx.acceleratedInstructions = 0;
 	ARMSetPrivilegeMode(cpu, MODE_IRQ);
 	cpu->gprs[ARM_SP] = GBA_SP_BASE_IRQ;
 	ARMSetPrivilegeMode(cpu, MODE_SUPERVISOR);
@@ -241,7 +253,6 @@ void GBAReset(struct ARMCore* cpu) {
 	ARMSetPrivilegeMode(cpu, MODE_SYSTEM);
 	cpu->gprs[ARM_SP] = GBA_SP_BASE_SYSTEM;
 
-	struct GBA* gba = (struct GBA*) cpu->master;
 	gba->memory.savedata.maskWriteback = false;
 	GBASavedataUnmask(&gba->memory.savedata);
 
@@ -328,6 +339,12 @@ void GBASkipBIOS(struct GBA* gba) {
 
 static void GBAProcessEvents(struct ARMCore* cpu) {
 	struct GBA* gba = (struct GBA*) cpu->master;
+#ifdef GBA_FX_TIMING_EXPERIMENT
+	if (gba->fx.alu2x && (cpu->halted || gba->cpuBlocked)) {
+		/* HALT/DMA resume at an integer board-clock deadline. */
+		gba->fx.aluPhase = 0;
+	}
+#endif
 
 	gba->bus = cpu->prefetch[1];
 	if (cpu->executionMode == MODE_THUMB) {
@@ -339,6 +356,11 @@ static void GBAProcessEvents(struct ARMCore* cpu) {
 		cpu->nextEvent = INT_MAX;
 		nextEvent = 0;
 		do {
+#ifdef GBA_FX_TIMING_EXPERIMENT
+			if (gba->fx.alu2x && gba->cpuBlocked) {
+				gba->fx.aluPhase = 0;
+			}
+#endif
 			int32_t cycles = cpu->cycles;
 			cpu->cycles = 0;
 			nextEvent = mTimingTick(&gba->timing, cycles < nextEvent ? nextEvent : cycles);
@@ -357,6 +379,11 @@ static void GBAProcessEvents(struct ARMCore* cpu) {
 	}
 	gba->earlyExit = false;
 	if (gba->cpuBlocked) {
+#ifdef GBA_FX_TIMING_EXPERIMENT
+		if (gba->fx.alu2x) {
+			gba->fx.aluPhase = 0;
+		}
+#endif
 		cpu->cycles = cpu->nextEvent;
 	}
 }
@@ -402,7 +429,7 @@ bool GBALoadNull(struct GBA* gba) {
 }
 
 bool GBALoadMB(struct GBA* gba, struct VFile* vf) {
-	memset(&gba->fx, 0, sizeof(gba->fx));
+	GBAUnloadROM(gba);
 	GBAUnloadMB(gba);
 	gba->mbVf = vf;
 	vf->seek(vf, 0, SEEK_SET);
@@ -427,7 +454,7 @@ void GBAUnloadMB(struct GBA* gba) {
 
 bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 	if (!vf) {
-		memset(&gba->fx, 0, sizeof(gba->fx));
+		GBAUnloadROM(gba);
 		return false;
 	}
 	GBAUnloadROM(gba);
@@ -436,6 +463,33 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 	if (detection == GBA_FX_INVALID) {
 		mLOG(GBA, WARN, "Invalid or unsupported GBA-FX development footer");
 		return false;
+	}
+	if (fx.active) {
+		struct mHostResources host;
+		if (mHostResourcesQuery(&host)) {
+			if (!GBAFXCalculateBudget(&gba->fxPolicy, &host, &fx.budget)) {
+				mLOG(GBA, WARN, "Invalid GBA-FX resource settings or insufficient memory budget");
+				return false;
+			}
+		} else if (fx.requiredFeatures & (GBA_FX_FEATURE_POLICY | GBA_FX_FEATURE_RAM)) {
+			mLOG(GBA, WARN, "GBA-FX host resource policy is unavailable on this platform");
+			return false;
+		}
+	}
+	if (fx.requiredFeatures & GBA_FX_FEATURE_RAM) {
+		fx.ramSize = GBAFXRAMGrant(&fx.budget, fx.minimumRAM);
+		if (!fx.ramSize) {
+			mLOG(GBA, WARN, "GBA-FX needs at least %u bytes of guest RAM; budget headroom is %llu bytes",
+			     fx.minimumRAM, (unsigned long long) fx.budget.headroomBytes);
+			return false;
+		}
+		fx.ram = anonymousMemoryMap(fx.ramSize);
+		if (!fx.ram) {
+			mLOG(GBA, WARN, "Could not allocate GBA-FX guest RAM (%u bytes)", fx.ramSize);
+			return false;
+		}
+		fx.budget.reservedBytes += fx.ramSize;
+		fx.budget.headroomBytes -= fx.ramSize;
 	}
 	gba->romVf = vf;
 	gba->isPristine = true;
@@ -467,6 +521,13 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 #else
 		gba->memory.rom = anonymousMemoryMap(GBA_SIZE_ROM0);
 #endif
+		if (!gba->memory.rom) {
+			GBAFXRAMDeinit(&fx);
+			gba->romVf = 0;
+			gba->memory.romSize = 0;
+			mLOG(GBA, WARN, "Couldn't allocate mirrored ROM");
+			return false;
+		}
 		vf->read(vf, gba->memory.rom, gba->pristineRomSize);
 		memcpy(&gba->memory.rom[0x40000], gba->memory.rom, 0x00100000);
 		memcpy(&gba->memory.rom[0x80000], gba->memory.rom, 0x00100000);
@@ -476,7 +537,10 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 		gba->memory.romSize = gba->pristineRomSize;
 	}
 	if (!gba->memory.rom) {
+		GBAFXRAMDeinit(&fx);
 		gba->romVf = NULL;
+		gba->memory.romSize = 0;
+		gba->memory.romMask = 0;
 		mLOG(GBA, WARN, "Couldn't map ROM");
 		return false;
 	}
@@ -488,6 +552,7 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 #ifndef FIXED_ROM_BUFFER
 		void* newRom = anonymousMemoryMap(GBA_SIZE_ROM0);
 		if (!newRom) {
+			GBAFXRAMDeinit(&fx);
 			vf->unmap(vf, gba->memory.rom, gba->pristineRomSize);
 			gba->memory.rom = 0;
 			gba->romVf = 0;
@@ -510,7 +575,12 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 	GBAUnlCartDetect(gba);
 	gba->fx = fx;
 	if (fx.active) {
-		mLOG(GBA, INFO, "GBA-FX development ROM detected (identification only)");
+		if (fx.budget.valid) {
+			mHostResourceRequestCPU(gba, fx.budget.policy.cpuPercent);
+		}
+		mLOG(GBA, INFO, "GBA-FX detected: RAM budget %u MiB, CPU target %u%%, cap status %u",
+		     (unsigned) (fx.budget.limitBytes / 1048576), fx.budget.policy.cpuPercent,
+		     mHostResourceCPUStatus(0));
 	}
 	// TODO: error check
 	return true;

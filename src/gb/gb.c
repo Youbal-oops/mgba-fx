@@ -4,6 +4,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include <mgba/internal/gb/gb.h>
+#include <mgba/internal/core/host-resource.h>
 
 #include <mgba/internal/defines.h>
 #include <mgba/internal/gb/io.h>
@@ -84,6 +85,7 @@ void GBCreate(struct GB* gb) {
 
 static void GBInit(void* cpu, struct mCPUComponent* component) {
 	struct GB* gb = (struct GB*) component;
+	mHostResourceRegister(gb);
 	gb->cpu = cpu;
 	gb->sync = NULL;
 
@@ -543,6 +545,7 @@ void GBApplyPatch(struct GB* gb, struct Patch* patch) {
 }
 
 void GBDestroy(struct GB* gb) {
+	mHostResourceUnregister(gb);
 	GBUnmapBIOS(gb);
 	GBUnloadROM(gb);
 

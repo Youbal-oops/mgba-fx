@@ -77,7 +77,14 @@ void mCoreRewindAppend(struct mCoreRewindContext* context, struct mCore* core) {
 	}
 #endif
 	struct VFile* nextState = context->previousState;
-	mCoreSaveStateNamed(core, nextState, SAVESTATE_SAVEDATA | SAVESTATE_RTC);
+	if (!mCoreSaveStateNamed(core, nextState, SAVESTATE_SAVEDATA | SAVESTATE_RTC)) {
+#ifndef DISABLE_THREADING
+		if (context->onThread) {
+			MutexUnlock(&context->mutex);
+		}
+#endif
+		return;
+	}
 	context->previousState = context->currentState;
 	context->currentState = nextState;
 #ifndef DISABLE_THREADING

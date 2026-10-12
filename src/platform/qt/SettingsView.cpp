@@ -540,6 +540,9 @@ void SettingsView::updateConfig() {
 	saveSetting("useDiscordPresence", m_ui.useDiscordPresence);
 	saveSetting("dynamicTitle", m_ui.dynamicTitle);
 	saveSetting("videoScale", m_ui.videoScale);
+	saveSetting("gba.fxMemoryPercent", m_ui.fxMemoryPercent);
+	saveSetting("gba.fxMemoryMiB", m_ui.fxMemoryMiB);
+	saveSetting("gba.fxCPUPercent", m_ui.fxCPUPercent);
 	saveSetting("gba.forceGbp", m_ui.forceGbp);
 	saveSetting("vbaBugCompat", m_ui.vbaBugCompat);
 	saveSetting("updateAutoCheck", m_ui.updateAutoCheck);
@@ -878,6 +881,9 @@ void SettingsView::reloadConfig() {
 		m_ui.videoScaleSize->setText(tr("(%1×%2)").arg(GBA_VIDEO_HORIZONTAL_PIXELS * value).arg(GBA_VIDEO_VERTICAL_PIXELS * value));
 	});
 	loadSetting("videoScale", m_ui.videoScale, 1);
+	loadSetting("gba.fxMemoryPercent", m_ui.fxMemoryPercent, 80);
+	loadSetting("gba.fxMemoryMiB", m_ui.fxMemoryMiB, 0);
+	loadSetting("gba.fxCPUPercent", m_ui.fxCPUPercent, 80);
 
 	QString multiplayerAudio = m_controller->getQtOption("multiplayerAudio").toString();
 	if (multiplayerAudio == QLatin1String("p1")) {

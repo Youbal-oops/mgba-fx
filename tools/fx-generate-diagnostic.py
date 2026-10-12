@@ -39,6 +39,53 @@ FONT = {
     " ": (0,) * 7,
 }
 
+FONT.update({
+    "H": (17, 17, 17, 31, 17, 17, 17),
+    "K": (17, 18, 20, 24, 20, 18, 17),
+    "P": (30, 17, 17, 30, 16, 16, 16),
+    "S": (15, 16, 16, 14, 1, 1, 30),
+    "U": (17, 17, 17, 17, 17, 17, 14),
+    "V": (17, 17, 17, 17, 17, 10, 4),
+    "W": (17, 17, 17, 21, 21, 27, 17),
+    "0": (14, 17, 19, 21, 25, 17, 14),
+    "1": (4, 12, 4, 4, 4, 4, 14),
+    "2": (14, 17, 1, 2, 4, 8, 31),
+    "3": (30, 1, 1, 14, 1, 1, 30),
+    "4": (2, 6, 10, 18, 31, 2, 2),
+    "5": (31, 16, 16, 30, 1, 1, 30),
+    "6": (14, 16, 16, 30, 17, 17, 14),
+    "7": (31, 1, 2, 4, 8, 8, 8),
+    "8": (14, 17, 17, 14, 17, 17, 14),
+    "9": (14, 17, 17, 15, 1, 1, 14),
+    "=": (0, 0, 31, 0, 31, 0, 0),
+})
+
+POLICY_FIELDS = (
+    ("RAM BUDGET MIB", 0x3C0),
+    ("AVAILABLE MIB", 0x3C4),
+    ("GUEST RAM MIB", 0x3EC),
+    ("CPU TARGET PCT", 0x3D8),
+    ("CPU CAP STATUS", 0x3DC),
+    ("LOGICAL CORES", 0x3F0),
+    ("CPU PROFILE X", 0x3F4),
+)
+
+TIMING_FIELDS = (("ALU PROFILE X", 0x3F4), ("ADDS THIS FRAME", 0), ("GUEST RAM MIB", 0x3EC))
+RAM_FIELDS = (("GUEST RAM MIB", 0), ("WORDS VERIFIED", 0), ("DATA ERRORS", 0),
+              ("ARM RESULT", 0), ("THUMB RESULT", 0))
+
+
+def draw_text(pixels, text, x, y, scale=1):
+    for character in text:
+        for row, bits in enumerate(FONT[character]):
+            for column in range(5):
+                if bits & (1 << (4 - column)):
+                    for dy in range(scale):
+                        for dx in range(scale):
+                            pixels[(y + row * scale + dy) * 240 + x + column * scale + dx] = 0x7FFF
+        x += 6 * scale
+
+
 def screen(label, background):
     pixels = [background] * PIXELS
     for text, y in (("GBA FX", 36), (label, 76), ("DETECTION ONLY", 116)):
@@ -71,8 +118,8 @@ class ArmProgram:
     def label(self, name):
         self.labels[name] = len(self.words)
 
-    def branch(self, name, condition=0xE):
-        self.branches.append((len(self.words), name, condition))
+    def branch(self, name, condition=0xE, link=False):
+        self.branches.append((len(self.words), name, condition, link))
         self.emit(0)
 
     def literal(self, register, value, condition=0xE):
@@ -80,11 +127,11 @@ class ArmProgram:
         self.emit(0)
 
     def finish(self):
-        for index, name, condition in self.branches:
+        for index, name, condition, link in self.branches:
             displacement = self.labels[name] - index - 2
             if not -(1 << 23) <= displacement < (1 << 23):
                 raise ValueError("ARM branch out of range")
-            self.words[index] = (condition << 28) | 0x0A000000 | (displacement & 0xFFFFFF)
+            self.words[index] = (condition << 28) | (0x0B000000 if link else 0x0A000000) | (displacement & 0xFFFFFF)
         for index, register, value, condition in self.literals:
             displacement = (len(self.words) - index - 2) * 4
             if not 0 <= displacement <= 0xFFF:
@@ -145,8 +192,8 @@ def boot_image(repo_root):
     return bytes(image)
 
 
-def enhanced_image(boot):
-    fields = (1, FOOTER_SIZE, 1, 0, len(boot), zlib.crc32(boot), 0, 0, 0, 0, 0)
+def enhanced_image(boot, features=1, minimum_ram=0):
+    fields = (1, FOOTER_SIZE, features, 0, len(boot), zlib.crc32(boot), minimum_ram, 0, 0, 0, 0)
     body = struct.pack("<11I", *fields)
     footer = body + struct.pack("<I", zlib.crc32(body)) + FOOTER_MAGIC
     if len(footer) != FOOTER_SIZE:
@@ -154,14 +201,306 @@ def enhanced_image(boot):
     return boot + footer
 
 
+def emit_decimal(p):
+    p.label("decimal")  # r0 = value, r1 = top-left VRAM address.
+    p.literal(2, 0x08015000)
+    p.emit(0xE3A0300A)  # mov r3, #10
+    p.label("digit")
+    p.emit(0xE4924004)  # ldr r4, [r2], #4 (next decimal divisor)
+    p.emit(0xE3A05000)  # mov r5, #0
+    p.label("subtract")
+    p.emit(0xE1500004)  # cmp r0, r4
+    p.emit(0x20400004)  # subhs r0, r0, r4
+    p.emit(0x22855001)  # addhs r5, r5, #1
+    p.branch("subtract", condition=2)
+    p.emit(0xE3A04046)  # mov r4, #70 (glyph bytes)
+    p.emit(0xE0060495)  # mul r6, r5, r4
+    p.literal(12, 0x08014000)
+    p.emit(0xE08C6006)  # add r6, r12, r6
+    p.emit(0xE1A07001)  # mov r7, r1
+    p.emit(0xE3A08007)  # mov r8, #7 (rows)
+    p.literal(10, 470)  # 480-byte scanline minus five pixels.
+    p.label("row")
+    p.emit(0xE3A09005)
+    p.label("pixel")
+    p.emit(0xE0D6B0B2)  # ldrh r11, [r6], #2
+    p.emit(0xE0C7B0B2)  # strh r11, [r7], #2
+    p.emit(0xE2599001)
+    p.branch("pixel", condition=1)
+    p.emit(0xE087700A)  # add r7, r7, r10
+    p.emit(0xE2588001)
+    p.branch("row", condition=1)
+    p.emit(0xE281100C)  # add r1, r1, #12 (six pixels)
+    p.emit(0xE2533001)
+    p.branch("digit", condition=1)
+    p.emit(0xE12FFF1E)  # bx lr
+
+
+def policy_image(repo_root):
+    """Guest code reads real registers and draws decimal values, without an SDK."""
+    image = bytearray(boot_image(repo_root))
+    image[0xA0:0xAC] = b"FX POLICY   "
+    image[0xAC:0xB0] = b"FX02"
+    image[0xBD] = (-sum(image[0xA0:0xBD]) - 0x19) & 0xFF
+    background = [0x0200] * PIXELS
+    draw_text(background, "GBA FX RESOURCES", 30, 8, 2)
+    for index, (label, _) in enumerate(POLICY_FIELDS):
+        draw_text(background, label, 8, 34 + index * 14)
+    draw_text(background, "CAP 1=ON  OTHER=TARGET ONLY", 8, 142)
+    draw_text(background, "RAM EXPANSION IS NEXT", 8, 152)
+    image[0x1000:0x1000 + PIXELS * 2] = struct.pack(f"<{PIXELS}H", *background)
+    glyphs = []
+    for digit in "0123456789":
+        for row in FONT[digit]:
+            glyphs.extend(0x7FFF if row & (1 << (4 - x)) else 0x0200 for x in range(5))
+    image[0x14000:0x14000 + len(glyphs) * 2] = struct.pack(f"<{len(glyphs)}H", *glyphs)
+    struct.pack_into("<10I", image, 0x15000, *(10 ** power for power in range(9, -1, -1)))
+    p = ArmProgram(0xC0)
+    p.literal(1, IO_MAGIC)
+    p.emit(0xE5912000)  # ldr r2, [r1]
+    p.literal(3, MAGIC_VALUE)
+    p.emit(0xE1520003)  # cmp r2, r3
+    p.emit(0x03A00001)  # moveq r0, #1
+    p.emit(0x13A00000)  # movne r0, #0
+    p.literal(1, 0x02000000)
+    p.emit(0xE5810000)  # str r0, [r1]
+    p.emit(0xE3500000)  # cmp r0, #0
+    p.branch("idle", condition=0)  # Unsupported emulator: never claim detection.
+    p.literal(1, 0x04000000)
+    p.literal(2, 0x0403)
+    p.emit(0xE1C120B0)
+    p.literal(4, 0x08001000)
+    p.literal(5, 0x06000000)
+    p.literal(3, PIXELS)
+    p.label("copy")
+    p.emit(0xE0D460B2)
+    p.emit(0xE0C560B2)
+    p.emit(0xE2533001)
+    p.branch("copy", condition=1)
+    for index, (_, register) in enumerate(POLICY_FIELDS):
+        p.literal(4, 0x04000000 + register)
+        p.emit(0xE5940000)  # ldr r0, [r4]
+        p.literal(4, 0x02000004 + index * 4)
+        p.emit(0xE5840000)  # Store a machine-readable copy of the guest's value.
+        p.literal(1, 0x06000000 + ((34 + index * 14) * 240 + 164) * 2)
+        p.branch("decimal", link=True)
+    p.literal(4, 0x02000020)
+    p.emit(0xE3A00001)
+    p.emit(0xE5840000)  # Done flag, after every digit was rendered.
+    p.label("idle")
+    p.branch("idle")
+    emit_decimal(p)
+    code = p.finish()
+    if 0xC0 + len(code) > 0x1000:
+        raise ValueError("Policy code overlaps screen data")
+    image[0xC0:0xC0 + len(code)] = code
+    return enhanced_image(bytes(image), features=3)
+
+
+def timing_image(repo_root, fast):
+    image = bytearray(policy_image(repo_root)[:-FOOTER_SIZE])
+    image[0xA0:0xAC] = b"FX ALU 2X   " if fast else b"FX ALU 1X   "
+    image[0xAC:0xB0] = b"FX04" if fast else b"FX03"
+    image[0xBD] = (-sum(image[0xA0:0xBD]) - 0x19) & 0xFF
+    image[0xC0:0x1000] = bytes(0x1000 - 0xC0)
+    background = [0x0200] * PIXELS
+    draw_text(background, "GBA FX ALU TEST", 30, 8, 2)
+    for index, (label, _) in enumerate(TIMING_FIELDS):
+        draw_text(background, label, 8, 34 + index * 14)
+    draw_text(background, "ARITHMETIC ONLY", 8, 112)
+    draw_text(background, "VIDEO AUDIO DMA STAY NORMAL", 8, 134)
+    image[0x1000:0x1000 + PIXELS * 2] = struct.pack(f"<{PIXELS}H", *background)
+    boot = ArmProgram(0xC0)
+    boot.literal(1, 0x04000000)
+    boot.literal(2, 0x0403)
+    boot.emit(0xE1C120B0)
+    boot.literal(4, 0x08001000)
+    boot.literal(5, 0x06000000)
+    boot.literal(3, PIXELS)
+    boot.label("background")
+    boot.emit(0xE0D460B2)
+    boot.emit(0xE0C560B2)
+    boot.emit(0xE2533001)
+    boot.branch("background", condition=1)
+    boot.literal(4, 0x08016000)
+    boot.literal(5, 0x03000000)
+    size_literal = len(boot.words)
+    boot.literal(3, 0)  # Patched with the IWRAM program's final word count.
+    boot.label("code")
+    boot.emit(0xE4946004)
+    boot.emit(0xE4856004)
+    boot.emit(0xE2533001)
+    boot.branch("code", condition=1)
+    boot.emit(0xE3A0D000)  # r13 counts arithmetic slots; this test uses no stack/IRQ.
+    boot.literal(12, 0x03000000)
+    boot.emit(0xE12FFF1C)
+    emit_decimal(boot)
+    decimal_address = 0x08000000 + boot.origin + boot.labels["decimal"] * 4
+
+    work = ArmProgram(0x03000000)
+    work.label("start")
+    work.literal(11, 0x04000006)
+    work.label("count")
+    for _ in range(64):
+        work.emit(0xE28DD001)  # add r13, r13, #1
+    work.emit(0xE1DB20B0)  # ldrh r2, [r11] (VCOUNT)
+    work.emit(0xE35200A0)
+    work.branch("count", condition=3)  # bcc: count until VBlank.
+    for index, (_, register) in enumerate(TIMING_FIELDS):
+        if register:
+            work.literal(4, 0x04000000 + register)
+            work.emit(0xE5940000)
+        else:
+            work.emit(0xE1A0000D)
+            work.emit(0xE3A0D000)
+        work.literal(4, 0x02000004 + index * 4)
+        work.emit(0xE5840000)
+        work.literal(1, 0x06000000 + ((34 + index * 14) * 240 + 164) * 2)
+        work.literal(12, decimal_address)
+        work.emit(0xE1A0E00F)  # mov lr, pc; return after the following BX.
+        work.emit(0xE12FFF1C)
+    work.literal(11, 0x04000006)
+    work.label("wait")
+    work.emit(0xE1DB20B0)
+    work.emit(0xE35200A0)
+    work.branch("wait", condition=2)
+    work.branch("start")
+    work_code = work.finish()
+    boot.literals = [(index, register, len(work_code) // 4 if index == size_literal else value, condition)
+                     for index, register, value, condition in boot.literals]
+    boot_code = boot.finish()
+    if 0xC0 + len(boot_code) > 0x1000 or len(work_code) > 0x8000:
+        raise ValueError("Timing diagnostic exceeds its code region")
+    image[0xC0:0xC0 + len(boot_code)] = boot_code
+    image[0x16000:0x16000 + len(work_code)] = work_code
+    return enhanced_image(bytes(image), features=7 if fast else 3)
+
+
+def ram_image(repo_root):
+    """Verify every granted word, then execute original ARM and Thumb code in FX RAM."""
+    image = bytearray(policy_image(repo_root)[:-FOOTER_SIZE])
+    image[0xA0:0xAC] = b"FX RAM TEST "
+    image[0xAC:0xB0] = b"FX05"
+    image[0xBD] = (-sum(image[0xA0:0xBD]) - 0x19) & 0xFF
+    background = [0x0200] * PIXELS
+    draw_text(background, "GBA FX RAM TEST", 30, 8, 2)
+    for index, (label, _) in enumerate(RAM_FIELDS):
+        draw_text(background, label, 8, 34 + index * 14)
+    draw_text(background, "FULL GRANT PATTERN CHECK", 8, 120)
+    draw_text(background, "CPU COPY FOR LEGACY DMA", 8, 142)
+    image[0x1000:0x1000 + PIXELS * 2] = struct.pack(f"<{PIXELS}H", *background)
+    boot = ArmProgram(0xC0)
+    boot.literal(1, 0x04000000)
+    boot.literal(2, 0x0403)
+    boot.emit(0xE1C120B0)
+    boot.literal(4, 0x08001000)
+    boot.literal(5, 0x06000000)
+    boot.literal(3, PIXELS)
+    boot.label("background")
+    boot.emit(0xE0D460B2)
+    boot.emit(0xE0C560B2)
+    boot.emit(0xE2533001)
+    boot.branch("background", condition=1)
+    boot.literal(4, 0x08016000)
+    boot.literal(5, 0x03000000)
+    size_literal = len(boot.words)
+    boot.literal(3, 0)
+    boot.label("code")
+    boot.emit(0xE4946004)
+    boot.emit(0xE4856004)
+    boot.emit(0xE2533001)
+    boot.branch("code", condition=1)
+    boot.literal(12, 0x03000000)
+    boot.emit(0xE12FFF1C)
+    emit_decimal(boot)
+    decimal_address = 0x08000000 + boot.origin + boot.labels["decimal"] * 4
+
+    work = ArmProgram(0x03000000)
+    work.literal(4, 0x040003EC)
+    work.emit(0xE5940000)
+    work.literal(4, 0x02000004)
+    work.emit(0xE5840000)
+    work.emit(0xE1A0A900)  # r10 = MiB << 18: word count.
+    work.literal(4, 0x02000008)
+    work.emit(0xE584A000)
+    work.literal(7, 0xA5C39E71)
+    work.literal(4, 0x10000000)
+    work.emit(0xE3A01000)
+    work.emit(0xE1A0300A)
+    work.label("write")
+    work.emit(0xE0212007)  # EOR r2, r1, r7
+    work.emit(0xE4842004)
+    work.emit(0xE2811001)
+    work.emit(0xE2533001)
+    work.branch("write", condition=1)
+    work.literal(4, 0x10000000)
+    work.emit(0xE3A01000)
+    work.emit(0xE1A0300A)
+    work.emit(0xE3A09000)
+    work.label("read")
+    work.emit(0xE4942004)
+    work.emit(0xE0215007)
+    work.emit(0xE1520005)
+    work.emit(0x12899001)  # ADDNE r9, r9, #1
+    work.emit(0xE2811001)
+    work.emit(0xE2533001)
+    work.branch("read", condition=1)
+    work.literal(4, 0x0200000C)
+    work.emit(0xE5849000)
+    work.literal(4, 0x10000000)
+    work.literal(0, 0xE3A0002A)  # MOV r0, #42
+    work.emit(0xE5840000)
+    work.literal(0, 0xE12FFF1E)  # BX lr
+    work.emit(0xE5840004)
+    work.emit(0xE1A0E00F)
+    work.emit(0xE12FFF14)
+    work.literal(4, 0x02000010)
+    work.emit(0xE5840000)
+    work.literal(4, 0x10000100)
+    work.literal(0, 0x4770202B)  # Thumb MOV r0, #43; BX lr.
+    work.emit(0xE5840000)
+    work.emit(0xE2844001)
+    work.emit(0xE1A0E00F)
+    work.emit(0xE12FFF14)
+    work.literal(4, 0x02000014)
+    work.emit(0xE5840000)
+    for index, _ in enumerate(RAM_FIELDS):
+        work.literal(4, 0x02000004 + index * 4)
+        work.emit(0xE5940000)
+        work.literal(1, 0x06000000 + ((34 + index * 14) * 240 + 164) * 2)
+        work.literal(12, decimal_address)
+        work.emit(0xE1A0E00F)
+        work.emit(0xE12FFF1C)
+    work.literal(4, 0x02000000)
+    work.emit(0xE3A00001)
+    work.emit(0xE5840000)
+    work.label("idle")
+    work.branch("idle")
+    code = work.finish()
+    boot.literals = [(index, register, len(code) // 4 if index == size_literal else value, condition)
+                     for index, register, value, condition in boot.literals]
+    boot_code = boot.finish()
+    if 0xC0 + len(boot_code) > 0x1000 or len(code) > 0x8000:
+        raise ValueError("RAM diagnostic exceeds its code region")
+    image[0xC0:0x1000] = bytes(0x1000 - 0xC0)
+    image[0xC0:0xC0 + len(boot_code)] = boot_code
+    image[0x16000:0x16000 + len(code)] = code
+    return enhanced_image(bytes(image), features=11, minimum_ram=1048576)
+
+
 def main():
     repo_root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=repo_root / "build-fx/diagnostics")
+    parser.add_argument("--timing", action="store_true", help="Generate opt-in 1x/2x arithmetic diagnostics")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     boot = boot_image(repo_root)
-    fixtures = {"ordinary.gba": boot, "enhanced.gba": enhanced_image(boot)}
+    fixtures = {"ordinary.gba": boot, "enhanced.gba": enhanced_image(boot),
+                "resources.gba": policy_image(repo_root), "ram.gba": ram_image(repo_root)}
+    if args.timing:
+        fixtures.update({"timing-1x.gba": timing_image(repo_root, False),
+                         "timing-2x.gba": timing_image(repo_root, True)})
     metadata = {}
     for name, data in fixtures.items():
         output = args.output_dir / name

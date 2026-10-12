@@ -1,6 +1,11 @@
 # Developing mGBA-FX on Windows
 
-This fork implements the experimental [GBA-FX detection prototype](fx-extension.md). Marked GBA development ROMs expose identification registers; expanded RAM, CPU capacity, resource settings, and `.gna` packaging remain later milestones.
+This fork implements experimental [GBA-FX detection and host budget queries](fx-extension.md). A [bounded guest RAM prototype](fx-ram-prototype.md) is now available. Large content, a general enhanced CPU model, and `.gna` packaging remain later milestones.
+
+The later resource prototype is described below. The optional
+[M3 arithmetic timing experiment](fx-timing-experiment.md) now demonstrates
+additional guest arithmetic work per frame while retaining peripheral timing.
+It is excluded from the default build and is not a full enhanced CPU model.
 
 ## Portable toolchain
 
@@ -77,7 +82,7 @@ CInema is run separately from the default unit-test invocation so the caller can
 
 ## Running the detection demonstration
 
-The build script generates the two original diagnostic ROMs and executes them when tests are enabled. To regenerate or inspect them separately:
+The build script generates three original diagnostic ROMs and executes them when tests are enabled. To regenerate or inspect them separately:
 
 ```powershell
 python ./tools/fx-generate-diagnostic.py
@@ -88,8 +93,9 @@ python ./tools/fx-generate-diagnostic.py
 
 Use the runtime PATH/plugin setup above. The ordinary fixture displays `NORMAL GBA`; the enhanced fixture displays `FX DETECTED`. Both use the same original boot program and frame assets. Only the enhanced file has the validated development footer. The standardized cartridge logo comes from the existing GBA regression fixture; no game program or game assets are copied.
 
+The standalone verifier commands describe the initial M1 workflow. That executable is now excluded from the default build pending the security review described below. Use `tools/fx-build.ps1` for the supported CInema/Python verification path or `tools/fx-run.ps1` for the visible demo.
 
-The verifier executes eight frames, checks the guest-written mode at `0x02000000`, compares all 38,400 VRAM pixels with the appropriate ROM asset, and writes a PNG screenshot. This demonstrates detection through executed guest code, in addition to parser unit tests.
+The default build uses the existing CInema runner to execute the ROMs and capture their screens after eight frames. `tools/fx-check-roms.py` independently decodes each PNG and checks all 38,400 pixels. For the resource ROM it also decodes the guest-rendered decimal digits, checks the configured budgets, and verifies zero extra RAM and the original clock. Captures are written only in new ignored directories; committed compatibility baselines are never updated. The separate C verifier additionally checks guest-written EWRAM against the register interface where that executable is available.
 
 The fixture generator is test infrastructure, rather than the public SDK or final package format. Temporary footer requirements and register addresses are documented in [fx-extension.md](fx-extension.md).
 
@@ -132,3 +138,39 @@ Each case runs 600 frames three times. The JSON records native emulation duratio
 | Disabled-background blend | 569.919 | 468.775 |
 
 Host scheduling produced noticeable variation, so these figures do not establish a speedup. Visual regression output remains identical; the ordinary diagnostic screenshot also matches the baseline byte for byte. Full timing/audio, persistence, resource-pressure, and long-run validation remain future work.
+
+## Host resource prototype and visible demo
+
+```powershell
+./tools/fx-run.ps1
+./tools/fx-run.ps1 -MemoryMiB 256 -CPUPercent 25
+./tools/fx-run.ps1 -MemoryMiB 512 -CPUPercent 60
+./tools/fx-run.ps1 -Rom ./build-fx/diagnostics/ordinary.gba
+```
+
+The launch script configures the portable DLL/plugin paths. `resources.gba` draws real values read by guest ARM code: RAM budget, available RAM, actual extra guest RAM, CPU target, cap status, allowed core count, and guest clock. Leading zeros are intentional. Status `1` means enforced; other values indicate a target only. This fixture requires detection and host policy; the other two fixtures require detection alone.
+
+Without resource arguments, the launch script uses saved settings or the 80% defaults. Use **Tools → Settings → Enhancements → GBA-FX development resources** to change them, then reopen the ROM. Explicit launch-script arguments override saved settings for that demonstration session.
+
+Verified on 2026-10-11: desktop/core/tool build; 27/27 CTest suites, including 16 GBA-FX cases; 26/26 GBA visual cases. The full available CInema run also completed with 184 passes and 88 expected failures, with no unexpected failures. Resource tests cover accounting, overrides, clamping, invalid/overflowing inputs, admission failure, access widths, read-only budget queries, pending versus active settings, reset, reopening, and ordinary-core coexistence.
+
+The desktop demo was also launched with `resources.gba`; the running window reported `mGBA - FX POLICY`. Help startup exited successfully. Desktop stdout/stderr logs are under `build-fx/milestone-2/desktop-demo-*.txt`.
+
+All five diagnostic runs passed independent complete-frame verification: ordinary, enhanced, default resource policy, 256 MiB/25%, and 512 MiB/60%. Representative resource output was `[15668, 19585, 0, 80, 4, 8, 1]`; RAM availability and its percentage budget vary by launch. Override runs reported exactly 256/25 and 512/60. Logs and the early captures are under ignored `build-fx/milestone-2/`; repeatable build captures are under `build-fx/diagnostics/visual-*/` with `verification.json` and `cinema.txt`.
+
+CPU enforcement measurement is available through `build-fx/mgba-fx-cpu.exe`, with the runtime PATH above. It saturates the allowed cores first with a 20% cap and then without that cap, reporting process CPU time relative to wall time and allowed CPU count. This managed session was already inside a Windows job: status `4`, so measurement was skipped. Hard-cap effectiveness has **not** been verified here. The RAM setting is an advisory accounting ceiling; no extra guest RAM has been allocated and the guest clock remains 1x. Expanded RAM, larger content, CPU timing, and persistence remain later stages.
+
+Windows Defender quarantined the standalone `mgba-fx-diagnostic.exe` build as `Trojan:Win64/CobaltStrike.PAA!MTB`. That detection has not been classified as a false positive. No security settings or exclusions were changed. The default verification path uses the existing CInema harness and independent Python screen checks; it does not require restoring or launching the quarantined executable. The standalone verifier remains unavailable pending a separate security review.
+
+Source changes follow `CONTRIBUTING.md` conventions and MPL 2.0 licensing. The upstream prohibition on AI-generated pull requests still applies if anyone later proposes submitting this work upstream.
+
+## Expanded RAM demonstration, 2026-10-12
+
+Run `./tools/fx-run.ps1 -RAMDiagnostic` to open `build-fx/diagnostics/ram.gba`
+in the default desktop build. It verifies the entire actual grant and executes
+ARM and Thumb routines from extra RAM. Headless 1/4/16 MiB demonstrations
+reported 262,144/1,048,576/4,194,304 words checked, zero errors, and results
+42/43. See [fx-ram-prototype.md](fx-ram-prototype.md) for memory semantics,
+budget accounting, DMA staging, and unsupported persistence. Earlier M2/M3
+results above describe their original fixtures; `resources.gba` still requests
+no extra RAM.

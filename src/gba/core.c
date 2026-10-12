@@ -217,7 +217,7 @@ struct GBACore {
 	bool hasOverride;
 	struct mDebuggerPlatform* debuggerPlatform;
 	struct mCheatDevice* cheatDevice;
-	struct mCoreMemoryBlock memoryBlocks[12];
+	struct mCoreMemoryBlock memoryBlocks[13];
 	size_t nMemoryBlocks;
 	int memoryBlockType;
 };
@@ -355,6 +355,7 @@ static void _GBACoreSetSync(struct mCore* core, struct mCoreSync* sync) {
 
 static void _GBACoreLoadConfig(struct mCore* core, const struct mCoreConfig* config) {
 	struct GBA* gba = core->board;
+	GBAFXPolicyLoad(&gba->fxPolicy, config);
 	if (core->opts.mute) {
 		gba->audio.masterVolume = 0;
 	} else {
@@ -387,6 +388,9 @@ static void _GBACoreLoadConfig(struct mCore* core, const struct mCoreConfig* con
 	mCoreConfigCopyValue(&core->config, config, "allowOpposingDirections");
 	mCoreConfigCopyValue(&core->config, config, "gba.bios");
 	mCoreConfigCopyValue(&core->config, config, "gba.forceGbp");
+	mCoreConfigCopyValue(&core->config, config, "gba.fxMemoryPercent");
+	mCoreConfigCopyValue(&core->config, config, "gba.fxMemoryMiB");
+	mCoreConfigCopyValue(&core->config, config, "gba.fxCPUPercent");
 	mCoreConfigCopyValue(&core->config, config, "vbaBugCompat");
 
 #ifndef DISABLE_THREADING
@@ -623,6 +627,10 @@ static void _GBACoreSetAVStream(struct mCore* core, struct mAVStream* stream) {
 static bool _GBACoreLoadROM(struct mCore* core, struct VFile* vf) {
 	struct GBACore* gbacore = (struct GBACore*) core;
 	struct GBA* gba = core->board;
+	if (gba->fx.ram) {
+		GBAUnloadROM(gba);
+	}
+	mHostResourceRequestCPU(gba, 0);
 	memset(&gba->fx, 0, sizeof(gba->fx));
 	if (GBAFXHasFooter(vf)) {
 		gbacore->memoryBlockType = -2;
@@ -867,20 +875,36 @@ static void _GBACoreReset(struct mCore* core) {
 	mTimingInterrupt(&gba->timing);
 }
 
+static void _GBACoreRunLoop(struct mCore* core) {
+#ifdef GBA_FX_TIMING_EXPERIMENT
+	struct GBA* gba = core->board;
+	if (gba->fx.active && gba->fx.alu2x) {
+		ARMRunLoopALU2x(core->cpu, GBA_BASE_IWRAM, 0xFF000000,
+		               &gba->fx.aluPhase, &gba->fx.acceleratedInstructions);
+		return;
+	}
+#endif
+	ARMRunLoop(core->cpu);
+}
+
 static void _GBACoreRunFrame(struct mCore* core) {
 	struct GBA* gba = core->board;
 	uint32_t frameCounter = gba->video.frameCounter;
 	uint32_t startCycle = mTimingCurrentTime(&gba->timing);
 	while (gba->video.frameCounter == frameCounter && mTimingCurrentTime(&gba->timing) - startCycle < VIDEO_TOTAL_LENGTH + VIDEO_HORIZONTAL_LENGTH) {
-		ARMRunLoop(core->cpu);
+		_GBACoreRunLoop(core);
 	}
 }
 
-static void _GBACoreRunLoop(struct mCore* core) {
-	ARMRunLoop(core->cpu);
-}
-
 static void _GBACoreStep(struct mCore* core) {
+#ifdef GBA_FX_TIMING_EXPERIMENT
+	struct GBA* gba = core->board;
+	if (gba->fx.active && gba->fx.alu2x) {
+		ARMRunALU2x(core->cpu, GBA_BASE_IWRAM, 0xFF000000,
+		            &gba->fx.aluPhase, &gba->fx.acceleratedInstructions);
+		return;
+	}
+#endif
 	ARMRun(core->cpu);
 }
 
@@ -890,10 +914,20 @@ static size_t _GBACoreStateSize(struct mCore* core) {
 }
 
 static bool _GBACoreLoadState(struct mCore* core, const void* state) {
+	const struct GBA* gba = core->board;
+	if (gba->fx.alu2x || gba->fx.ram) {
+		mLOG(GBA, WARN, "Save states are unavailable for the GBA-FX timing/RAM prototype");
+		return false;
+	}
 	return GBADeserialize(core->board, state);
 }
 
 static bool _GBACoreSaveState(struct mCore* core, void* state) {
+	const struct GBA* gba = core->board;
+	if (gba->fx.alu2x || gba->fx.ram) {
+		mLOG(GBA, WARN, "Save states are unavailable for the GBA-FX timing/RAM prototype");
+		return false;
+	}
 	GBASerialize(core->board, state);
 	return true;
 }
@@ -1122,7 +1156,8 @@ size_t _GBACoreListMemoryBlocks(const struct mCore* core, const struct mCoreMemo
 	const struct GBA* gba = core->board;
 	struct GBACore* gbacore = (struct GBACore*) core;
 
-	if (gbacore->memoryBlockType != gba->memory.savedata.type) {
+	if (gbacore->memoryBlockType != gba->memory.savedata.type ||
+	    (gbacore->nMemoryBlocks && gbacore->memoryBlocks[gbacore->nMemoryBlocks - 1].id == GBA_REGION_FX_RAM) != (gba->fx.ram != 0)) {
 		switch (gba->memory.savedata.type) {
 		case GBA_SAVEDATA_SRAM:
 			memcpy(gbacore->memoryBlocks, _GBAMemoryBlocksSRAM, sizeof(_GBAMemoryBlocksSRAM));
@@ -1160,6 +1195,13 @@ size_t _GBACoreListMemoryBlocks(const struct mCore* core, const struct mCoreMemo
 				gbacore->memoryBlocks[i].size = gba->memory.romSize;
 			}
 		}
+		if (gba->fx.ram) {
+			gbacore->memoryBlocks[gbacore->nMemoryBlocks++] = (struct mCoreMemoryBlock) {
+				GBA_REGION_FX_RAM, "fxram", "FX RAM", "Enhanced working RAM",
+				GBA_FX_RAM_BASE, GBA_FX_RAM_BASE + gba->fx.ramSize, gba->fx.ramSize,
+				mCORE_MEMORY_RW | mCORE_MEMORY_MAPPED
+			};
+		}
 		gbacore->memoryBlockType = gba->memory.savedata.type;
 
 		mCALLBACKS_INVOKE(gba, memoryBlocksChanged);
@@ -1174,6 +1216,9 @@ void* _GBACoreGetMemoryBlock(struct mCore* core, size_t id, size_t* sizeOut) {
 	switch (id) {
 	default:
 		return NULL;
+	case GBA_REGION_FX_RAM:
+		*sizeOut = gba->fx.ramSize;
+		return gba->fx.ram;
 	case GBA_REGION_BIOS:
 		*sizeOut = GBA_SIZE_BIOS;
 		return gba->memory.bios;

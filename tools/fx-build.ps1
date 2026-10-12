@@ -7,6 +7,7 @@ param(
     [switch]$SkipQt,
     [switch]$SkipTests,
     [switch]$Fresh,
+    [switch]$TimingExperiment,
     [ValidateSet('Debug', 'RelWithDebInfo', 'Release')]
     [string]$Configuration = 'RelWithDebInfo',
     [ValidateRange(1, 64)]
@@ -23,7 +24,7 @@ $depsRoot = Join-Path $toolsRoot 'deps'
 $epoxyRoot = Join-Path $depsRoot 'mingw64'
 $cmockaSource = Join-Path $toolsRoot 'cmocka-1.1.8'
 $cmockaBuild = Join-Path $toolsRoot 'cmocka-build'
-$buildRoot = Join-Path $repoRoot 'build-fx'
+$buildRoot = Join-Path $repoRoot $(if ($TimingExperiment) { 'build-fx/timing' } else { 'build-fx' })
 $cmake = Join-Path $pythonRoot 'cmake/data/bin/cmake.exe'
 $ctest = Join-Path $pythonRoot 'cmake/data/bin/ctest.exe'
 $ninja = Join-Path $pythonRoot 'bin/ninja.exe'
@@ -153,6 +154,7 @@ try {
     Invoke-Checked $cmake @('--install', $cmockaBuild)
 
     $qtEnabled = if ($SkipQt) { 'OFF' } else { 'ON' }
+    $timingEnabled = if ($TimingExperiment) { 'ON' } else { 'OFF' }
     $configureArguments = @(
         '-S', $repoRoot, '-B', $buildRoot, '-G', 'Ninja',
         "-DCMAKE_MAKE_PROGRAM=$ninja",
@@ -162,6 +164,7 @@ try {
         "-DCMAKE_RANLIB=$(Join-Path $compilerBin 'gcc-ranlib.exe')",
         "-DCMAKE_BUILD_TYPE=$Configuration", '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
         '-DBUILD_LTO=OFF',
+        "-DBUILD_FX_TIMING_EXPERIMENT=$timingEnabled",
         "-DCMAKE_PREFIX_PATH=$qtRoot;$depsRoot;$epoxyRoot",
         "-DCMOCKA_INCLUDE_DIRS=$(Join-Path $depsRoot 'include')",
         "-DCMOCKA_LIBRARY_DIRS=$(Join-Path $depsRoot 'lib')",
@@ -188,12 +191,19 @@ try {
     Invoke-Checked $cmake @('--build', $buildRoot, '--parallel', "$Jobs")
     if (-not $SkipTests) {
         Invoke-Checked $ctest @('--test-dir', $buildRoot, '--output-on-failure', '-E', '^cinema$')
-        $diagnostic = Join-Path $buildRoot 'mgba-fx-diagnostic.exe'
-        if (Test-Path -LiteralPath $diagnostic) {
-            Invoke-Checked 'python' @((Join-Path $PSScriptRoot 'fx-generate-diagnostic.py'))
+        $cinema = Join-Path $buildRoot 'test/mgba-cinema.exe'
+        if (Test-Path -LiteralPath $cinema) {
+            $generateArguments = @((Join-Path $PSScriptRoot 'fx-generate-diagnostic.py'), '--output-dir', (Join-Path $buildRoot 'diagnostics'))
+            if ($TimingExperiment) {
+                $generateArguments += '--timing'
+            }
+            Invoke-Checked 'python' $generateArguments
             $fixtures = Join-Path $buildRoot 'diagnostics'
-            Invoke-Checked $diagnostic @((Join-Path $fixtures 'ordinary.gba'), '0', (Join-Path $fixtures 'ordinary.png'))
-            Invoke-Checked $diagnostic @((Join-Path $fixtures 'enhanced.gba'), '1', (Join-Path $fixtures 'enhanced.png'))
+            $verifyArguments = @((Join-Path $PSScriptRoot 'fx-check-roms.py'), '--cinema', $cinema, '--fixtures', $fixtures)
+            if ($TimingExperiment) {
+                $verifyArguments += '--timing'
+            }
+            Invoke-Checked 'python' $verifyArguments
         }
     }
     Write-Output "Build complete: $buildRoot"

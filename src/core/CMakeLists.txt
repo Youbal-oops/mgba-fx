@@ -6,6 +6,7 @@ set(SOURCE_FILES
 	config.c
 	core.c
 	directories.c
+	host-resource.c
 	input.c
 	interface.c
 	lockstep.c

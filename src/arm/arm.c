@@ -262,3 +262,62 @@ void ARMRunFake(struct ARMCore* cpu, uint32_t opcode) {
 	cpu->prefetch[1] = cpu->prefetch[0];
 	cpu->prefetch[0] = opcode;
 }
+
+#ifdef GBA_FX_TIMING_EXPERIMENT
+static bool _ARMALU2xEligible(const struct ARMCore* cpu, uint32_t base, uint32_t mask) {
+	bool thumb = cpu->executionMode == MODE_THUMB;
+	unsigned width = thumb ? WORD_SIZE_THUMB : WORD_SIZE_ARM;
+	if ((((uint32_t) cpu->gprs[ARM_PC] - width) & mask) != base ||
+	    (thumb ? cpu->memory.activeSeqCycles16 : cpu->memory.activeSeqCycles32)) {
+		return false;
+	}
+	uint32_t opcode = cpu->prefetch[0];
+	if (thumb) {
+		/* MOV/CMP/ADD/SUB immediate; no loads, branches, or status control. */
+		return (opcode & 0xE000) == 0x2000;
+	}
+	bool immediate = (opcode & 0x0E000000) == 0x02000000;
+	bool immediateShift = !(opcode & 0x0E000010);
+	unsigned operation = (opcode >> 21) & 15;
+	return (immediate || immediateShift) && ((opcode >> 12) & 15) != ARM_PC &&
+	       (operation < 8 || operation > 11 || (opcode & 0x00100000));
+}
+
+static void _ARMALU2xStep(struct ARMCore* cpu, uint32_t base, uint32_t mask,
+                        uint8_t* phase, uint64_t* instructions) {
+	bool eligible = _ARMALU2xEligible(cpu, base, mask);
+	int32_t before = cpu->cycles;
+	if (cpu->executionMode == MODE_THUMB) {
+		ThumbStep(cpu);
+	} else {
+		ARMStep(cpu);
+	}
+	/* Only a verified one-cycle, side-effect-free retirement is converted. */
+	if (eligible && cpu->cycles == before + 1) {
+		*phase ^= 1;
+		if (*phase) {
+			--cpu->cycles;
+		}
+		++*instructions;
+	}
+}
+
+void ARMRunALU2x(struct ARMCore* cpu, uint32_t base, uint32_t mask,
+                uint8_t* phase, uint64_t* instructions) {
+	while (cpu->cycles >= cpu->nextEvent) {
+		cpu->irqh.processEvents(cpu);
+	}
+	_ARMALU2xStep(cpu, base, mask, phase, instructions);
+	while (cpu->cycles >= cpu->nextEvent) {
+		cpu->irqh.processEvents(cpu);
+	}
+}
+
+void ARMRunLoopALU2x(struct ARMCore* cpu, uint32_t base, uint32_t mask,
+                    uint8_t* phase, uint64_t* instructions) {
+	while (cpu->cycles < cpu->nextEvent) {
+		_ARMALU2xStep(cpu, base, mask, phase, instructions);
+	}
+	cpu->irqh.processEvents(cpu);
+}
+#endif

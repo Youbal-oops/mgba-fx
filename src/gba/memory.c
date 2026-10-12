@@ -117,6 +117,10 @@ void GBAMemoryDeinit(struct GBA* gba) {
 }
 
 void GBAMemoryReset(struct GBA* gba) {
+	if (gba->fx.ram) {
+		memset(gba->fx.ram, 0, gba->fx.ramSize);
+	}
+
 	if (gba->memory.wram && gba->memory.rom) {
 		memset(gba->memory.wram, 0, GBA_SIZE_EWRAM);
 	}
@@ -300,6 +304,14 @@ static void GBASetActiveRegion(struct ARMCore* cpu, uint32_t address) {
 	}
 	memory->activeRegion = newRegion;
 	switch (newRegion) {
+	case GBA_REGION_FX_RAM:
+		if (!gba->fx.ram) {
+			goto invalidAddress;
+		}
+		cpu->memory.accessSource = mACCESS_PROGRAM;
+		cpu->memory.activeRegion = gba->fx.ram;
+		cpu->memory.activeMask = gba->fx.ramSize - 1;
+		break;
 	case GBA_REGION_BIOS:
 		cpu->memory.accessSource = mACCESS_SYSTEM;
 		cpu->memory.activeRegion = memory->bios;
@@ -354,6 +366,7 @@ static void GBASetActiveRegion(struct ARMCore* cpu, uint32_t address) {
 		}
 	// Fall through
 	default:
+	invalidAddress:
 		cpu->memory.accessSource = mACCESS_UNKNOWN;
 		memory->activeRegion = -1;
 		cpu->memory.activeRegion = (uint32_t*) _deadbeef;
@@ -379,6 +392,18 @@ static void GBASetActiveRegion(struct ARMCore* cpu, uint32_t address) {
 
 #define LOAD_BAD \
 	value = GBALoadBad(cpu);
+
+#define LOAD_FX_RAM \
+	if (gba->fx.ram) { \
+		LOAD_32(value, address & (gba->fx.ramSize - 4), gba->fx.ram); \
+	} else { \
+		LOAD_BAD; \
+	}
+
+#define STORE_FX_RAM \
+	if (gba->fx.ram) { \
+		STORE_32(value, address & (gba->fx.ramSize - 4), gba->fx.ram); \
+	}
 
 #define LOAD_BIOS \
 	if (address < GBA_SIZE_BIOS) { \
@@ -481,6 +506,9 @@ uint32_t GBALoad32(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 	char* waitstatesRegion = memory->waitstatesNonseq32;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_RAM:
+		LOAD_FX_RAM;
+		break;
 	case GBA_REGION_BIOS:
 		LOAD_BIOS;
 		break;
@@ -522,7 +550,7 @@ uint32_t GBALoad32(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 
 	if (cycleCounter) {
 		wait += 2;
-		if (address < GBA_BASE_ROM0) {
+		if (address < GBA_BASE_ROM0 || ((address >> BASE_OFFSET) == GBA_REGION_FX_RAM && gba->fx.ram)) {
 			wait = GBAMemoryStall(cpu, wait);
 		}
 		*cycleCounter += wait;
@@ -539,6 +567,13 @@ uint32_t GBALoad16(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 	int wait = 0;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_RAM:
+		if (gba->fx.ram) {
+			LOAD_16(value, address & (gba->fx.ramSize - 2), gba->fx.ram);
+		} else {
+			value = (GBALoadBad(cpu) >> ((address & 2) * 8)) & 0xFFFF;
+		}
+		break;
 	case GBA_REGION_BIOS:
 		if (address < GBA_SIZE_BIOS) {
 			if (memory->activeRegion == GBA_REGION_BIOS) {
@@ -637,7 +672,7 @@ uint32_t GBALoad16(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 
 	if (cycleCounter) {
 		wait += 2;
-		if (address < GBA_BASE_ROM0) {
+		if (address < GBA_BASE_ROM0 || ((address >> BASE_OFFSET) == GBA_REGION_FX_RAM && gba->fx.ram)) {
 			wait = GBAMemoryStall(cpu, wait);
 		}
 		*cycleCounter += wait;
@@ -654,6 +689,9 @@ uint32_t GBALoad8(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 	int wait = 0;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_RAM:
+		value = gba->fx.ram ? ((uint8_t*) gba->fx.ram)[address & (gba->fx.ramSize - 1)] : (GBALoadBad(cpu) >> ((address & 3) * 8)) & 0xFF;
+		break;
 	case GBA_REGION_BIOS:
 		if (address < GBA_SIZE_BIOS) {
 			if (memory->activeRegion == GBA_REGION_BIOS) {
@@ -748,7 +786,7 @@ uint32_t GBALoad8(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 
 	if (cycleCounter) {
 		wait += 2;
-		if (address < GBA_BASE_ROM0) {
+		if (address < GBA_BASE_ROM0 || ((address >> BASE_OFFSET) == GBA_REGION_FX_RAM && gba->fx.ram)) {
 			wait = GBAMemoryStall(cpu, wait);
 		}
 		*cycleCounter += wait;
@@ -830,6 +868,9 @@ void GBAStore32(struct ARMCore* cpu, uint32_t address, int32_t value, int* cycle
 	char* waitstatesRegion = memory->waitstatesNonseq32;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_RAM:
+		STORE_FX_RAM;
+		break;
 	case GBA_REGION_EWRAM:
 		STORE_EWRAM;
 		break;
@@ -867,7 +908,7 @@ void GBAStore32(struct ARMCore* cpu, uint32_t address, int32_t value, int* cycle
 
 	if (cycleCounter) {
 		++wait;
-		if (address < GBA_BASE_ROM0) {
+		if (address < GBA_BASE_ROM0 || ((address >> BASE_OFFSET) == GBA_REGION_FX_RAM && gba->fx.ram)) {
 			wait = GBAMemoryStall(cpu, wait);
 		}
 		*cycleCounter += wait;
@@ -881,6 +922,11 @@ void GBAStore16(struct ARMCore* cpu, uint32_t address, int16_t value, int* cycle
 	int16_t oldValue;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_RAM:
+		if (gba->fx.ram) {
+			STORE_16(value, address & (gba->fx.ramSize - 2), gba->fx.ram);
+		}
+		break;
 	case GBA_REGION_EWRAM:
 		STORE_16(value, address & (GBA_SIZE_EWRAM - 2), memory->wram);
 		wait = memory->waitstatesNonseq16[GBA_REGION_EWRAM];
@@ -1012,7 +1058,7 @@ void GBAStore16(struct ARMCore* cpu, uint32_t address, int16_t value, int* cycle
 
 	if (cycleCounter) {
 		++wait;
-		if (address < GBA_BASE_ROM0) {
+		if (address < GBA_BASE_ROM0 || ((address >> BASE_OFFSET) == GBA_REGION_FX_RAM && gba->fx.ram)) {
 			wait = GBAMemoryStall(cpu, wait);
 		}
 		*cycleCounter += wait;
@@ -1026,6 +1072,11 @@ void GBAStore8(struct ARMCore* cpu, uint32_t address, int8_t value, int* cycleCo
 	uint16_t oldValue;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_RAM:
+		if (gba->fx.ram) {
+			((uint8_t*) gba->fx.ram)[address & (gba->fx.ramSize - 1)] = value;
+		}
+		break;
 	case GBA_REGION_EWRAM:
 		((int8_t*) memory->wram)[address & (GBA_SIZE_EWRAM - 1)] = value;
 		wait = memory->waitstatesNonseq16[GBA_REGION_EWRAM];
@@ -1098,7 +1149,7 @@ void GBAStore8(struct ARMCore* cpu, uint32_t address, int8_t value, int* cycleCo
 
 	if (cycleCounter) {
 		++wait;
-		if (address < GBA_BASE_ROM0) {
+		if (address < GBA_BASE_ROM0 || ((address >> BASE_OFFSET) == GBA_REGION_FX_RAM && gba->fx.ram)) {
 			wait = GBAMemoryStall(cpu, wait);
 		}
 		*cycleCounter += wait;
@@ -1115,6 +1166,11 @@ uint32_t GBAView32(struct ARMCore* cpu, uint32_t address) {
 			LOAD_32(value, address, gba->memory.bios);
 		}
 		break;
+	case GBA_REGION_FX_RAM:
+		if (!gba->fx.ram) {
+			break;
+		}
+		// Fall through
 	case GBA_REGION_EWRAM:
 	case GBA_REGION_IWRAM:
 	case GBA_REGION_PALETTE_RAM:
@@ -1154,6 +1210,11 @@ uint16_t GBAView16(struct ARMCore* cpu, uint32_t address) {
 			LOAD_16(value, address, gba->memory.bios);
 		}
 		break;
+	case GBA_REGION_FX_RAM:
+		if (!gba->fx.ram) {
+			break;
+		}
+		// Fall through
 	case GBA_REGION_EWRAM:
 	case GBA_REGION_IWRAM:
 	case GBA_REGION_PALETTE_RAM:
@@ -1168,8 +1229,8 @@ uint16_t GBAView16(struct ARMCore* cpu, uint32_t address) {
 		value = GBALoad16(cpu, address, 0);
 		break;
 	case GBA_REGION_IO:
-		if (gba->fx.active && (address & OFFSET_MASK) >= GBA_FX_IO_BASE && (address & OFFSET_MASK) < GBA_FX_IO_BASE + 16) {
-			value = GBAFXReadRegister(address & OFFSET_MASK);
+		if (gba->fx.active && (address & OFFSET_MASK) >= GBA_FX_IO_START && (address & OFFSET_MASK) < GBA_FX_IO_END) {
+			value = GBAFXReadRegister(&gba->fx, address & OFFSET_MASK);
 		} else if ((address & OFFSET_MASK) < GBA_REG_MAX || (address & OFFSET_MASK) == GBA_REG_POSTFLG) {
 			value = gba->memory.io[(address & OFFSET_MASK) >> 1];
 		} else if ((address & OFFSET_MASK) == GBA_REG_EXWAITCNT_LO || (address & OFFSET_MASK) == GBA_REG_EXWAITCNT_HI) {
@@ -1196,6 +1257,11 @@ uint8_t GBAView8(struct ARMCore* cpu, uint32_t address) {
 			value = ((uint8_t*) gba->memory.bios)[address];
 		}
 		break;
+	case GBA_REGION_FX_RAM:
+		if (!gba->fx.ram) {
+			break;
+		}
+		// Fall through
 	case GBA_REGION_EWRAM:
 	case GBA_REGION_IWRAM:
 	case GBA_REGION_ROM0:
@@ -1225,6 +1291,12 @@ void GBAPatch32(struct ARMCore* cpu, uint32_t address, int32_t value, int32_t* o
 	int32_t oldValue = -1;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_RAM:
+		if (gba->fx.ram) {
+			LOAD_32(oldValue, address & (gba->fx.ramSize - 4), gba->fx.ram);
+			STORE_32(value, address & (gba->fx.ramSize - 4), gba->fx.ram);
+		}
+		break;
 	case GBA_REGION_EWRAM:
 		LOAD_32(oldValue, address & (GBA_SIZE_EWRAM - 4), memory->wram);
 		STORE_32(value, address & (GBA_SIZE_EWRAM - 4), memory->wram);
@@ -1299,6 +1371,12 @@ void GBAPatch16(struct ARMCore* cpu, uint32_t address, int16_t value, int16_t* o
 	int16_t oldValue = -1;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_RAM:
+		if (gba->fx.ram) {
+			LOAD_16(oldValue, address & (gba->fx.ramSize - 2), gba->fx.ram);
+			STORE_16(value, address & (gba->fx.ramSize - 2), gba->fx.ram);
+		}
+		break;
 	case GBA_REGION_EWRAM:
 		LOAD_16(oldValue, address & (GBA_SIZE_EWRAM - 2), memory->wram);
 		STORE_16(value, address & (GBA_SIZE_EWRAM - 2), memory->wram);
@@ -1381,6 +1459,12 @@ void GBAPatch8(struct ARMCore* cpu, uint32_t address, int8_t value, int8_t* old)
 	int16_t alignedValue;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_RAM:
+		if (gba->fx.ram) {
+			oldValue = ((uint8_t*) gba->fx.ram)[address & (gba->fx.ramSize - 1)];
+			((uint8_t*) gba->fx.ram)[address & (gba->fx.ramSize - 1)] = value;
+		}
+		break;
 	case GBA_REGION_EWRAM:
 		oldValue = ((int8_t*) memory->wram)[address & (GBA_SIZE_EWRAM - 1)];
 		((int8_t*) memory->wram)[address & (GBA_SIZE_EWRAM - 1)] = value;
@@ -1504,12 +1588,15 @@ uint32_t GBALoadMultiple(struct ARMCore* cpu, uint32_t address, int mask, enum L
 
 	uint32_t addressMisalign = address & 0x3;
 	int region = address >> BASE_OFFSET;
-	if (region < GBA_REGION_SRAM) {
+	if (region < GBA_REGION_SRAM || region == GBA_REGION_FX_RAM) {
 		address &= 0xFFFFFFFC;
 	}
 	int wait = memory->waitstatesSeq32[region] - memory->waitstatesNonseq32[region];
 
 	switch (region) {
+	case GBA_REGION_FX_RAM:
+		LDM_LOOP(LOAD_FX_RAM);
+		break;
 	case GBA_REGION_BIOS:
 		LDM_LOOP(LOAD_BIOS);
 		break;
@@ -1550,7 +1637,7 @@ uint32_t GBALoadMultiple(struct ARMCore* cpu, uint32_t address, int mask, enum L
 
 	if (cycleCounter) {
 		++wait;
-		if (address < GBA_BASE_ROM0) {
+		if (address < GBA_BASE_ROM0 || ((address >> BASE_OFFSET) == GBA_REGION_FX_RAM && gba->fx.ram)) {
 			wait = GBAMemoryStall(cpu, wait);
 		}
 		*cycleCounter += wait;
@@ -1626,12 +1713,15 @@ uint32_t GBAStoreMultiple(struct ARMCore* cpu, uint32_t address, int mask, enum 
 
 	uint32_t addressMisalign = address & 0x3;
 	int region = address >> BASE_OFFSET;
-	if (region < GBA_REGION_SRAM) {
+	if (region < GBA_REGION_SRAM || region == GBA_REGION_FX_RAM) {
 		address &= 0xFFFFFFFC;
 	}
 	int wait = memory->waitstatesSeq32[region] - memory->waitstatesNonseq32[region];
 
 	switch (region) {
+	case GBA_REGION_FX_RAM:
+		STM_LOOP(STORE_FX_RAM);
+		break;
 	case GBA_REGION_EWRAM:
 		STM_LOOP(STORE_EWRAM);
 		break;
@@ -1668,7 +1758,7 @@ uint32_t GBAStoreMultiple(struct ARMCore* cpu, uint32_t address, int mask, enum 
 	}
 
 	if (cycleCounter) {
-		if (address < GBA_BASE_ROM0) {
+		if (address < GBA_BASE_ROM0 || ((address >> BASE_OFFSET) == GBA_REGION_FX_RAM && gba->fx.ram)) {
 			wait = GBAMemoryStall(cpu, wait);
 		}
 		*cycleCounter += wait;
@@ -1783,7 +1873,7 @@ int32_t GBAMemoryStall(struct ARMCore* cpu, int32_t wait) {
 	struct GBA* gba = (struct GBA*) cpu->master;
 	struct GBAMemory* memory = &gba->memory;
 
-	if (memory->activeRegion < GBA_REGION_ROM0 || !memory->prefetch) {
+	if (memory->activeRegion < GBA_REGION_ROM0 || memory->activeRegion > GBA_REGION_ROM2_EX || !memory->prefetch) {
 		// The wait is the stall
 		return wait;
 	}
