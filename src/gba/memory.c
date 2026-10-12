@@ -393,6 +393,14 @@ static void GBASetActiveRegion(struct ARMCore* cpu, uint32_t address) {
 #define LOAD_BAD \
 	value = GBALoadBad(cpu);
 
+#define LOAD_FX_CONTENT \
+	if (gba->fx.content) { \
+		value = GBAFXContentRead(&gba->fx, address & ~3U, 4); \
+		wait += 6; \
+	} else { \
+		LOAD_BAD; \
+	}
+
 #define LOAD_FX_RAM \
 	if (gba->fx.ram) { \
 		LOAD_32(value, address & (gba->fx.ramSize - 4), gba->fx.ram); \
@@ -506,6 +514,9 @@ uint32_t GBALoad32(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 	char* waitstatesRegion = memory->waitstatesNonseq32;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_CONTENT:
+		LOAD_FX_CONTENT;
+		break;
 	case GBA_REGION_FX_RAM:
 		LOAD_FX_RAM;
 		break;
@@ -567,6 +578,14 @@ uint32_t GBALoad16(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 	int wait = 0;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_CONTENT:
+		if (gba->fx.content) {
+			value = GBAFXContentRead(&gba->fx, address & ~1U, 2);
+			wait = 2;
+		} else {
+			value = (GBALoadBad(cpu) >> ((address & 2) * 8)) & 0xFFFF;
+		}
+		break;
 	case GBA_REGION_FX_RAM:
 		if (gba->fx.ram) {
 			LOAD_16(value, address & (gba->fx.ramSize - 2), gba->fx.ram);
@@ -689,6 +708,14 @@ uint32_t GBALoad8(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 	int wait = 0;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_CONTENT:
+		if (gba->fx.content) {
+			value = GBAFXContentRead(&gba->fx, address, 1);
+			wait = 2;
+		} else {
+			value = (GBALoadBad(cpu) >> ((address & 3) * 8)) & 0xFF;
+		}
+		break;
 	case GBA_REGION_FX_RAM:
 		value = gba->fx.ram ? ((uint8_t*) gba->fx.ram)[address & (gba->fx.ramSize - 1)] : (GBALoadBad(cpu) >> ((address & 3) * 8)) & 0xFF;
 		break;
@@ -868,6 +895,8 @@ void GBAStore32(struct ARMCore* cpu, uint32_t address, int32_t value, int* cycle
 	char* waitstatesRegion = memory->waitstatesNonseq32;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_CONTENT:
+		break; /* Read-only data; no copy-on-write or debugger patching. */
 	case GBA_REGION_FX_RAM:
 		STORE_FX_RAM;
 		break;
@@ -922,6 +951,8 @@ void GBAStore16(struct ARMCore* cpu, uint32_t address, int16_t value, int* cycle
 	int16_t oldValue;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_CONTENT:
+		break; /* Read-only data; no copy-on-write or debugger patching. */
 	case GBA_REGION_FX_RAM:
 		if (gba->fx.ram) {
 			STORE_16(value, address & (gba->fx.ramSize - 2), gba->fx.ram);
@@ -1072,6 +1103,8 @@ void GBAStore8(struct ARMCore* cpu, uint32_t address, int8_t value, int* cycleCo
 	uint16_t oldValue;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_CONTENT:
+		break; /* Read-only data; no copy-on-write or debugger patching. */
 	case GBA_REGION_FX_RAM:
 		if (gba->fx.ram) {
 			((uint8_t*) gba->fx.ram)[address & (gba->fx.ramSize - 1)] = value;
@@ -1161,6 +1194,9 @@ uint32_t GBAView32(struct ARMCore* cpu, uint32_t address) {
 	uint32_t value = 0;
 	address &= ~3;
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_CONTENT:
+		value = GBAFXContentRead(&gba->fx, address, 4);
+		break;
 	case GBA_REGION_BIOS:
 		if (address < GBA_SIZE_BIOS) {
 			LOAD_32(value, address, gba->memory.bios);
@@ -1205,6 +1241,9 @@ uint16_t GBAView16(struct ARMCore* cpu, uint32_t address) {
 	uint16_t value = 0;
 	address &= ~1;
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_CONTENT:
+		value = GBAFXContentRead(&gba->fx, address, 2);
+		break;
 	case GBA_REGION_BIOS:
 		if (address < GBA_SIZE_BIOS) {
 			LOAD_16(value, address, gba->memory.bios);
@@ -1252,6 +1291,9 @@ uint8_t GBAView8(struct ARMCore* cpu, uint32_t address) {
 	struct GBA* gba = (struct GBA*) cpu->master;
 	uint8_t value = 0;
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_CONTENT:
+		value = GBAFXContentRead(&gba->fx, address, 1);
+		break;
 	case GBA_REGION_BIOS:
 		if (address < GBA_SIZE_BIOS) {
 			value = ((uint8_t*) gba->memory.bios)[address];
@@ -1291,6 +1333,8 @@ void GBAPatch32(struct ARMCore* cpu, uint32_t address, int32_t value, int32_t* o
 	int32_t oldValue = -1;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_CONTENT:
+		break; /* Read-only data; no copy-on-write or debugger patching. */
 	case GBA_REGION_FX_RAM:
 		if (gba->fx.ram) {
 			LOAD_32(oldValue, address & (gba->fx.ramSize - 4), gba->fx.ram);
@@ -1371,6 +1415,8 @@ void GBAPatch16(struct ARMCore* cpu, uint32_t address, int16_t value, int16_t* o
 	int16_t oldValue = -1;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_CONTENT:
+		break; /* Read-only data; no copy-on-write or debugger patching. */
 	case GBA_REGION_FX_RAM:
 		if (gba->fx.ram) {
 			LOAD_16(oldValue, address & (gba->fx.ramSize - 2), gba->fx.ram);
@@ -1459,6 +1505,8 @@ void GBAPatch8(struct ARMCore* cpu, uint32_t address, int8_t value, int8_t* old)
 	int16_t alignedValue;
 
 	switch (address >> BASE_OFFSET) {
+	case GBA_REGION_FX_CONTENT:
+		break; /* Read-only data; no copy-on-write or debugger patching. */
 	case GBA_REGION_FX_RAM:
 		if (gba->fx.ram) {
 			oldValue = ((uint8_t*) gba->fx.ram)[address & (gba->fx.ramSize - 1)];
@@ -1588,12 +1636,15 @@ uint32_t GBALoadMultiple(struct ARMCore* cpu, uint32_t address, int mask, enum L
 
 	uint32_t addressMisalign = address & 0x3;
 	int region = address >> BASE_OFFSET;
-	if (region < GBA_REGION_SRAM || region == GBA_REGION_FX_RAM) {
+	if (region < GBA_REGION_SRAM || region == GBA_REGION_FX_RAM || region == GBA_REGION_FX_CONTENT) {
 		address &= 0xFFFFFFFC;
 	}
 	int wait = memory->waitstatesSeq32[region] - memory->waitstatesNonseq32[region];
 
 	switch (region) {
+	case GBA_REGION_FX_CONTENT:
+		LDM_LOOP(LOAD_FX_CONTENT);
+		break;
 	case GBA_REGION_FX_RAM:
 		LDM_LOOP(LOAD_FX_RAM);
 		break;
@@ -1713,12 +1764,14 @@ uint32_t GBAStoreMultiple(struct ARMCore* cpu, uint32_t address, int mask, enum 
 
 	uint32_t addressMisalign = address & 0x3;
 	int region = address >> BASE_OFFSET;
-	if (region < GBA_REGION_SRAM || region == GBA_REGION_FX_RAM) {
+	if (region < GBA_REGION_SRAM || region == GBA_REGION_FX_RAM || region == GBA_REGION_FX_CONTENT) {
 		address &= 0xFFFFFFFC;
 	}
 	int wait = memory->waitstatesSeq32[region] - memory->waitstatesNonseq32[region];
 
 	switch (region) {
+	case GBA_REGION_FX_CONTENT:
+		break; /* Read-only data; no copy-on-write or debugger patching. */
 	case GBA_REGION_FX_RAM:
 		STM_LOOP(STORE_FX_RAM);
 		break;

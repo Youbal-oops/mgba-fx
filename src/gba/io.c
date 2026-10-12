@@ -297,7 +297,19 @@ void GBAIOInit(struct GBA* gba) {
 	}
 }
 
+static void _writeFXRegister(struct GBA* gba, uint32_t address, uint32_t value, unsigned width) {
+	uint32_t previousBank = gba->fx.contentBank;
+	GBAFXWriteRegister(&gba->fx, address, value, width);
+	if (previousBank != gba->fx.contentBank) {
+		mCALLBACKS_INVOKE(gba, memoryBlocksChanged);
+	}
+}
+
 void GBAIOWrite(struct GBA* gba, uint32_t address, uint16_t value) {
+	if (gba->fx.content && address >= GBA_FX_IO_START && address < GBA_FX_IO_END) {
+		_writeFXRegister(gba, address, value, 2);
+		return;
+	}
 	if (address < GBA_REG_SOUND1CNT_LO && (address > GBA_REG_VCOUNT || address < GBA_REG_DISPSTAT)) {
 		gba->memory.io[address >> 1] = gba->video.renderer->writeVideoRegister(gba->video.renderer, address, value);
 		return;
@@ -574,6 +586,10 @@ void GBAIOWrite(struct GBA* gba, uint32_t address, uint16_t value) {
 }
 
 void GBAIOWrite8(struct GBA* gba, uint32_t address, uint8_t value) {
+	if (gba->fx.content && address >= GBA_FX_IO_START && address < GBA_FX_IO_END) {
+		_writeFXRegister(gba, address, value, 1);
+		return;
+	}
 	if (address >= GBA_REG_DEBUG_STRING && address - GBA_REG_DEBUG_STRING < sizeof(gba->debugString)) {
 		gba->debugString[address - GBA_REG_DEBUG_STRING] = value;
 		return;
@@ -674,6 +690,10 @@ void GBAIOWrite8(struct GBA* gba, uint32_t address, uint8_t value) {
 }
 
 void GBAIOWrite32(struct GBA* gba, uint32_t address, uint32_t value) {
+	if (gba->fx.content && address >= GBA_FX_IO_START && address < GBA_FX_IO_END) {
+		_writeFXRegister(gba, address, value, 4);
+		return;
+	}
 	switch (address) {
 	// Wave RAM can be written and read even if the audio hardware is disabled.
 	// However, it is not possible to switch between the two banks because it

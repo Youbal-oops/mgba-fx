@@ -146,7 +146,7 @@ void GBAUnloadROM(struct GBA* gba) {
 		gba->memory.activeRegion = -1;
 		gba->cpu->memory.setActiveRegion(gba->cpu, GBA_BASE_BIOS);
 	}
-	GBAFXRAMDeinit(&gba->fx);
+	GBAFXDeinit(&gba->fx, gba->romVf);
 	memset(&gba->fx, 0, sizeof(gba->fx));
 	GBAMemoryClearAGBPrint(gba);
 	if (gba->memory.unl.type) {
@@ -246,6 +246,8 @@ void GBAReset(struct ARMCore* cpu) {
 	struct GBA* gba = (struct GBA*) cpu->master;
 	gba->fx.aluPhase = 0;
 	gba->fx.acceleratedInstructions = 0;
+	gba->fx.contentBank = 0;
+	gba->fx.invalidBank = false;
 	ARMSetPrivilegeMode(cpu, MODE_IRQ);
 	cpu->gprs[ARM_SP] = GBA_SP_BASE_IRQ;
 	ARMSetPrivilegeMode(cpu, MODE_SUPERVISOR);
@@ -307,7 +309,7 @@ void GBAReset(struct ARMCore* cpu) {
 	memset(gba->debugString, 0, sizeof(gba->debugString));
 
 
-	if (gba->romVf && gba->romVf->size(gba->romVf) > GBA_SIZE_ROM0) {
+	if (!gba->fx.active && gba->romVf && gba->romVf->size(gba->romVf) > GBA_SIZE_ROM0) {
 		char ident;
 		gba->romVf->seek(gba->romVf, 0xAC, SEEK_SET);
 		gba->romVf->read(gba->romVf, &ident, 1);
@@ -471,10 +473,19 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 				mLOG(GBA, WARN, "Invalid GBA-FX resource settings or insufficient memory budget");
 				return false;
 			}
-		} else if (fx.requiredFeatures & (GBA_FX_FEATURE_POLICY | GBA_FX_FEATURE_RAM)) {
+		} else if (fx.requiredFeatures & (GBA_FX_FEATURE_POLICY | GBA_FX_FEATURE_RAM | GBA_FX_FEATURE_CONTENT)) {
 			mLOG(GBA, WARN, "GBA-FX host resource policy is unavailable on this platform");
 			return false;
 		}
+	}
+	if (fx.contentSize) {
+		uint64_t mappingSize = (uint64_t) fx.bootSize + fx.contentSize + GBA_FX_FOOTER_SIZE;
+		if (mappingSize > fx.budget.headroomBytes) {
+			mLOG(GBA, WARN, "GBA-FX content mapping exceeds remaining memory budget");
+			return false;
+		}
+		fx.budget.headroomBytes -= mappingSize;
+		fx.budget.reservedBytes += mappingSize;
 	}
 	if (fx.requiredFeatures & GBA_FX_FEATURE_RAM) {
 		fx.ramSize = GBAFXRAMGrant(&fx.budget, fx.minimumRAM);
@@ -490,6 +501,15 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 		}
 		fx.budget.reservedBytes += fx.ramSize;
 		fx.budget.headroomBytes -= fx.ramSize;
+	}
+	if (fx.contentSize) {
+		fx.contentMapping = vf->map(vf, (size_t) fx.bootSize + fx.contentSize + GBA_FX_FOOTER_SIZE, MAP_READ);
+		if (!fx.contentMapping) {
+			GBAFXDeinit(&fx, vf);
+			mLOG(GBA, WARN, "Could not map GBA-FX content");
+			return false;
+		}
+		fx.content = (const uint8_t*) fx.contentMapping + fx.bootSize;
 	}
 	gba->romVf = vf;
 	gba->isPristine = true;
@@ -522,7 +542,7 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 		gba->memory.rom = anonymousMemoryMap(GBA_SIZE_ROM0);
 #endif
 		if (!gba->memory.rom) {
-			GBAFXRAMDeinit(&fx);
+			GBAFXDeinit(&fx, vf);
 			gba->romVf = 0;
 			gba->memory.romSize = 0;
 			mLOG(GBA, WARN, "Couldn't allocate mirrored ROM");
@@ -537,7 +557,7 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 		gba->memory.romSize = gba->pristineRomSize;
 	}
 	if (!gba->memory.rom) {
-		GBAFXRAMDeinit(&fx);
+		GBAFXDeinit(&fx, vf);
 		gba->romVf = NULL;
 		gba->memory.romSize = 0;
 		gba->memory.romMask = 0;
@@ -552,7 +572,7 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 #ifndef FIXED_ROM_BUFFER
 		void* newRom = anonymousMemoryMap(GBA_SIZE_ROM0);
 		if (!newRom) {
-			GBAFXRAMDeinit(&fx);
+			GBAFXDeinit(&fx, vf);
 			vf->unmap(vf, gba->memory.rom, gba->pristineRomSize);
 			gba->memory.rom = 0;
 			gba->romVf = 0;

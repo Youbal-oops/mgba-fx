@@ -217,7 +217,10 @@ struct GBACore {
 	bool hasOverride;
 	struct mDebuggerPlatform* debuggerPlatform;
 	struct mCheatDevice* cheatDevice;
-	struct mCoreMemoryBlock memoryBlocks[13];
+	struct mCoreMemoryBlock memoryBlocks[14];
+	bool listedFXRAM;
+	bool listedFXContent;
+	uint32_t listedContentBank;
 	size_t nMemoryBlocks;
 	int memoryBlockType;
 };
@@ -271,6 +274,9 @@ static bool _GBACoreInit(struct mCore* core) {
 #endif
 	gbacore->nMemoryBlocks = 0;
 	gbacore->memoryBlockType = -2;
+	gbacore->listedFXRAM = false;
+	gbacore->listedFXContent = false;
+	gbacore->listedContentBank = 0;
 
 	GBACreate(gba);
 	// TODO: Restore cheats
@@ -627,7 +633,7 @@ static void _GBACoreSetAVStream(struct mCore* core, struct mAVStream* stream) {
 static bool _GBACoreLoadROM(struct mCore* core, struct VFile* vf) {
 	struct GBACore* gbacore = (struct GBACore*) core;
 	struct GBA* gba = core->board;
-	if (gba->fx.ram) {
+	if (gba->fx.ram || gba->fx.content) {
 		GBAUnloadROM(gba);
 	}
 	mHostResourceRequestCPU(gba, 0);
@@ -719,7 +725,11 @@ static void _GBACoreChecksum(const struct mCore* core, void* data, enum mCoreChe
 	const struct GBA* gba = (const struct GBA*) core->board;
 	switch (type) {
 	case mCHECKSUM_CRC32:
-		memcpy(data, &gba->romCrc32, sizeof(gba->romCrc32));
+		if (gba->fx.content) {
+			memcpy(data, &gba->fx.fileCRC, sizeof(gba->fx.fileCRC));
+		} else {
+			memcpy(data, &gba->romCrc32, sizeof(gba->romCrc32));
+		}
 		break;
 	case mCHECKSUM_MD5:
 		if (gba->romVf) {
@@ -915,8 +925,8 @@ static size_t _GBACoreStateSize(struct mCore* core) {
 
 static bool _GBACoreLoadState(struct mCore* core, const void* state) {
 	const struct GBA* gba = core->board;
-	if (gba->fx.alu2x || gba->fx.ram) {
-		mLOG(GBA, WARN, "Save states are unavailable for the GBA-FX timing/RAM prototype");
+	if (gba->fx.alu2x || gba->fx.ram || gba->fx.content) {
+		mLOG(GBA, WARN, "Save states are unavailable for the GBA-FX timing/RAM/content prototype");
 		return false;
 	}
 	return GBADeserialize(core->board, state);
@@ -924,8 +934,8 @@ static bool _GBACoreLoadState(struct mCore* core, const void* state) {
 
 static bool _GBACoreSaveState(struct mCore* core, void* state) {
 	const struct GBA* gba = core->board;
-	if (gba->fx.alu2x || gba->fx.ram) {
-		mLOG(GBA, WARN, "Save states are unavailable for the GBA-FX timing/RAM prototype");
+	if (gba->fx.alu2x || gba->fx.ram || gba->fx.content) {
+		mLOG(GBA, WARN, "Save states are unavailable for the GBA-FX timing/RAM/content prototype");
 		return false;
 	}
 	GBASerialize(core->board, state);
@@ -1157,7 +1167,9 @@ size_t _GBACoreListMemoryBlocks(const struct mCore* core, const struct mCoreMemo
 	struct GBACore* gbacore = (struct GBACore*) core;
 
 	if (gbacore->memoryBlockType != gba->memory.savedata.type ||
-	    (gbacore->nMemoryBlocks && gbacore->memoryBlocks[gbacore->nMemoryBlocks - 1].id == GBA_REGION_FX_RAM) != (gba->fx.ram != 0)) {
+	    gbacore->listedFXRAM != (gba->fx.ram != 0) ||
+	    gbacore->listedFXContent != (gba->fx.content != 0) ||
+	    gbacore->listedContentBank != gba->fx.contentBank) {
 		switch (gba->memory.savedata.type) {
 		case GBA_SAVEDATA_SRAM:
 			memcpy(gbacore->memoryBlocks, _GBAMemoryBlocksSRAM, sizeof(_GBAMemoryBlocksSRAM));
@@ -1202,6 +1214,17 @@ size_t _GBACoreListMemoryBlocks(const struct mCore* core, const struct mCoreMemo
 				mCORE_MEMORY_RW | mCORE_MEMORY_MAPPED
 			};
 		}
+		if (gba->fx.content) {
+			uint32_t size = GBAFXContentBankSize(&gba->fx);
+			gbacore->memoryBlocks[gbacore->nMemoryBlocks++] = (struct mCoreMemoryBlock) {
+				GBA_REGION_FX_CONTENT, "fxcontent", "FX content", "Read-only content bank",
+				GBA_FX_CONTENT_BASE, GBA_FX_CONTENT_BASE + size, size,
+				mCORE_MEMORY_READ | mCORE_MEMORY_MAPPED
+			};
+		}
+		gbacore->listedFXRAM = gba->fx.ram != 0;
+		gbacore->listedFXContent = gba->fx.content != 0;
+		gbacore->listedContentBank = gba->fx.contentBank;
 		gbacore->memoryBlockType = gba->memory.savedata.type;
 
 		mCALLBACKS_INVOKE(gba, memoryBlocksChanged);
@@ -1216,6 +1239,9 @@ void* _GBACoreGetMemoryBlock(struct mCore* core, size_t id, size_t* sizeOut) {
 	switch (id) {
 	default:
 		return NULL;
+	case GBA_REGION_FX_CONTENT:
+		*sizeOut = GBAFXContentBankSize(&gba->fx);
+		return gba->fx.content ? (void*) (gba->fx.content + (size_t) gba->fx.contentBank * GBA_FX_CONTENT_WINDOW) : 0;
 	case GBA_REGION_FX_RAM:
 		*sizeOut = gba->fx.ramSize;
 		return gba->fx.ram;

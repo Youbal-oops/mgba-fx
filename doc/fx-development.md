@@ -1,6 +1,6 @@
 # Developing mGBA-FX on Windows
 
-This fork implements experimental [GBA-FX detection and host budget queries](fx-extension.md). A [bounded guest RAM prototype](fx-ram-prototype.md) is now available. Large content, a general enhanced CPU model, and `.gna` packaging remain later milestones.
+This fork implements experimental [GBA-FX detection and host budget queries](fx-extension.md). A [bounded guest RAM prototype](fx-ram-prototype.md) is now available. A [banked content prototype](fx-content-prototype.md) adds larger payloads. A general enhanced CPU model and `.gna` packaging remain later milestones.
 
 The later resource prototype is described below. The optional
 [M3 arithmetic timing experiment](fx-timing-experiment.md) now demonstrates
@@ -174,3 +174,11 @@ reported 262,144/1,048,576/4,194,304 words checked, zero errors, and results
 budget accounting, DMA staging, and unsupported persistence. Earlier M2/M3
 results above describe their original fixtures; `resources.gba` still requests
 no extra RAM.
+
+## Larger-content prototype, 2026-10-12
+
+Build with `./tools/fx-build.ps1 -ContentPrototype`, then launch with
+`./tools/fx-run.ps1 -ContentPrototype`. This selects a separate
+`build-fx/content` build and generates original 64/128 MiB payload fixtures.
+See [fx-content-prototype.md](fx-content-prototype.md) for the bank window,
+checksum, budget, and access rules. Enhanced persistence remains unavailable.

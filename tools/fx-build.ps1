@@ -8,6 +8,7 @@ param(
     [switch]$SkipTests,
     [switch]$Fresh,
     [switch]$TimingExperiment,
+    [switch]$ContentPrototype,
     [ValidateSet('Debug', 'RelWithDebInfo', 'Release')]
     [string]$Configuration = 'RelWithDebInfo',
     [ValidateRange(1, 64)]
@@ -24,7 +25,7 @@ $depsRoot = Join-Path $toolsRoot 'deps'
 $epoxyRoot = Join-Path $depsRoot 'mingw64'
 $cmockaSource = Join-Path $toolsRoot 'cmocka-1.1.8'
 $cmockaBuild = Join-Path $toolsRoot 'cmocka-build'
-$buildRoot = Join-Path $repoRoot $(if ($TimingExperiment) { 'build-fx/timing' } else { 'build-fx' })
+$buildRoot = Join-Path $repoRoot $(if ($ContentPrototype) { 'build-fx/content' } elseif ($TimingExperiment) { 'build-fx/timing' } else { 'build-fx' })
 $cmake = Join-Path $pythonRoot 'cmake/data/bin/cmake.exe'
 $ctest = Join-Path $pythonRoot 'cmake/data/bin/ctest.exe'
 $ninja = Join-Path $pythonRoot 'bin/ninja.exe'
@@ -197,11 +198,17 @@ try {
             if ($TimingExperiment) {
                 $generateArguments += '--timing'
             }
+            if ($ContentPrototype) {
+                $generateArguments += '--content'
+            }
             Invoke-Checked 'python' $generateArguments
             $fixtures = Join-Path $buildRoot 'diagnostics'
             $verifyArguments = @((Join-Path $PSScriptRoot 'fx-check-roms.py'), '--cinema', $cinema, '--fixtures', $fixtures)
             if ($TimingExperiment) {
                 $verifyArguments += '--timing'
+            }
+            if ($ContentPrototype) {
+                $verifyArguments += '--content'
             }
             Invoke-Checked 'python' $verifyArguments
         }

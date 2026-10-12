@@ -130,7 +130,7 @@ M_TEST_DEFINE(validFooter) {
 M_TEST_DEFINE(rejectInvalidFields) {
 	/* Recompute descriptor CRC so each rejection tests the field itself. */
 	const uint32_t fields[][2] = {
-		{0, 2}, {4, 63}, {8, 16}, {0x10, 0xBF}, {0x10, BOOT_SIZE - 1},
+		{0, 2}, {4, 63}, {8, 32}, {0x10, 0xBF}, {0x10, BOOT_SIZE - 1},
 		{0x10, GBA_SIZE_ROM0 + 1}, {0x18, 1}, {0x1C, 1},
 		{0x20, 1}, {0x24, 1}, {0x28, 1}
 	};
@@ -993,7 +993,181 @@ M_TEST_DEFINE(ramStateRejected) {
 	free(pixels);
 }
 
+static uint8_t _contentByte(uint32_t offset) {
+	return (0xA5C39E71U ^ (offset >> 2)) >> ((offset & 3) * 8);
+}
+
+static uint8_t* _contentRom(uint32_t size) {
+	uint8_t* original = _rom();
+	uint8_t* rom = malloc(BOOT_SIZE + size + GBA_FX_FOOTER_SIZE);
+	assert_non_null(rom);
+	memcpy(rom, original, BOOT_SIZE);
+	memcpy(rom + BOOT_SIZE + size, original + BOOT_SIZE, GBA_FX_FOOTER_SIZE);
+	free(original);
+	uint32_t i;
+	for (i = 0; i < size; ++i) {
+		rom[BOOT_SIZE + i] = _contentByte(i);
+	}
+	uint8_t* footer = rom + BOOT_SIZE + size;
+	_write32(footer + 8, GBA_FX_FEATURE_DETECTION | GBA_FX_FEATURE_CONTENT);
+	_write32(footer + 0x1C, size);
+	_write32(footer + 0x20, doCrc32(rom + BOOT_SIZE, size));
+	_write32(footer + 0x2C, doCrc32(footer, 0x2C));
+	return rom;
+}
+
+M_TEST_DEFINE(contentDescriptor) {
+	uint32_t size = 31;
+	uint8_t* rom = _contentRom(size);
+	uint8_t* footer = rom + BOOT_SIZE + size;
+	struct GBAFXState fx;
+	assert_int_equal(_detect(rom, BOOT_SIZE + size + GBA_FX_FOOTER_SIZE, &fx), GBA_FX_VALID);
+	assert_int_equal(fx.bootSize, BOOT_SIZE);
+	assert_int_equal(fx.contentSize, size);
+	rom[BOOT_SIZE + size - 1] ^= 1;
+	assert_int_equal(_detect(rom, BOOT_SIZE + size + GBA_FX_FOOTER_SIZE, &fx), GBA_FX_INVALID);
+	rom[BOOT_SIZE + size - 1] ^= 1;
+	const uint32_t fields[][2] = {{8, 1}, {0x1C, 30}, {0x1C, 32}, {0x1C, UINT32_MAX}, {0x1C, GBA_FX_CONTENT_MAX + 1}, {0x24, 1}};
+	unsigned i;
+	for (i = 0; i < sizeof(fields) / sizeof(*fields); ++i) {
+		uint32_t saved = fields[i][0] == 8 ? 17 : fields[i][0] == 0x1C ? size : 0;
+		_write32(footer + fields[i][0], fields[i][1]);
+		_write32(footer + 0x2C, doCrc32(footer, 0x2C));
+		assert_int_equal(_detect(rom, BOOT_SIZE + size + GBA_FX_FOOTER_SIZE, &fx), GBA_FX_INVALID);
+		_write32(footer + fields[i][0], saved);
+	}
+	free(rom);
+}
+
+M_TEST_DEFINE(contentBanksAndBounds) {
+	uint32_t size = 2 * GBA_FX_CONTENT_WINDOW + 7;
+	uint8_t* rom = _contentRom(size);
+	struct mCore* core = _core();
+#ifdef _WIN32
+	assert_true(_load(core, rom, BOOT_SIZE + size + GBA_FX_FOOTER_SIZE));
+	struct GBA* gba = core->board;
+	assert_int_equal(gba->memory.romSize, BOOT_SIZE);
+	assert_int_equal(gba->romCrc32, doCrc32(rom, BOOT_SIZE));
+	assert_int_equal(core->busRead32(core, 0x040003A4), size);
+	uint32_t identity = 0;
+	core->checksum(core, &identity, mCHECKSUM_CRC32);
+	assert_int_equal(identity, doCrc32(rom, BOOT_SIZE + size + GBA_FX_FOOTER_SIZE));
+	unsigned bank;
+	for (bank = 0; bank < 3; ++bank) {
+		core->busWrite32(core, 0x040003A0, bank);
+		assert_int_equal(core->busRead32(core, 0x040003A0), bank);
+		uint32_t expected = 0xA5C39E71U ^ (bank * (GBA_FX_CONTENT_WINDOW / 4));
+		assert_int_equal(core->busRead32(core, GBA_FX_CONTENT_BASE), expected);
+		assert_int_equal(core->busRead8(core, GBA_FX_CONTENT_BASE + 1), (expected >> 8) & 255);
+		assert_int_equal(core->busRead16(core, GBA_FX_CONTENT_BASE), expected & 65535);
+		assert_int_equal(core->busRead32(core, GBA_FX_CONTENT_BASE + 1), (expected >> 8) | (expected << 24));
+		assert_int_equal(core->rawRead32(core, GBA_FX_CONTENT_BASE, -1), expected);
+		core->busWrite32(core, GBA_FX_CONTENT_BASE, 0);
+		core->rawWrite32(core, GBA_FX_CONTENT_BASE, -1, 0);
+		core->busWrite8(core, GBA_FX_CONTENT_BASE, 0);
+		core->busWrite16(core, GBA_FX_CONTENT_BASE, 0);
+		assert_int_equal(core->busRead32(core, GBA_FX_CONTENT_BASE), expected);
+		size_t mapped = 0;
+		const uint8_t* memory = core->getMemoryBlock(core, GBA_REGION_FX_CONTENT, &mapped);
+		assert_non_null(memory);
+		assert_int_equal(mapped, bank == 2 ? 7 : GBA_FX_CONTENT_WINDOW);
+		const struct mCoreMemoryBlock* blocks;
+		size_t count = core->listMemoryBlocks(core, &blocks);
+		assert_int_equal(blocks[count - 1].id, GBA_REGION_FX_CONTENT);
+		assert_int_equal(blocks[count - 1].size, mapped);
+	}
+	assert_int_equal(core->busRead8(core, GBA_FX_CONTENT_BASE + 6), _contentByte(size - 1));
+	assert_int_equal(core->busRead8(core, GBA_FX_CONTENT_BASE + 7), 0);
+	assert_int_equal(core->busRead32(core, GBA_FX_CONTENT_BASE + 4), (0xA5C39E71U ^ (2 * GBA_FX_CONTENT_WINDOW / 4 + 1)) & 0xFFFFFF);
+	core->busWrite32(core, 0x040003A0, UINT32_MAX);
+	assert_int_equal(core->busRead32(core, 0x040003A0), 2);
+	assert_int_equal(core->busRead32(core, 0x040003B0), 1);
+	core->busWrite8(core, 0x040003A0, 1);
+	assert_int_equal(core->busRead32(core, 0x040003A0), 1);
+	assert_int_equal(core->busRead32(core, 0x040003B0), 0);
+	core->busWrite16(core, 0x040003A0, 2);
+	assert_int_equal(core->busRead32(core, 0x040003A0), 2);
+	core->reset(core);
+	assert_int_equal(gba->fx.contentBank, 0);
+	assert_non_null(gba->fx.content);
+	int cycles = 0;
+	GBALoad32(core->cpu, GBA_FX_CONTENT_BASE, &cycles);
+	assert_int_equal(cycles, 8);
+	struct ARMCore* cpu = core->cpu;
+	GBALoadMultiple(cpu, GBA_FX_CONTENT_BASE, 3, LSM_IA, 0);
+	assert_int_equal((uint32_t) cpu->gprs[0], 0xA5C39E71U);
+	assert_int_equal((uint32_t) cpu->gprs[1], 0xA5C39E70U);
+	void* snapshot = malloc(core->stateSize(core));
+	assert_false(core->saveState(core, snapshot));
+	assert_false(core->loadState(core, snapshot));
+	free(snapshot);
+	cpu->memory.setActiveRegion(cpu, GBA_FX_CONTENT_BASE);
+	assert_int_equal(cpu->memory.activeMask, 0);
+	assert_true(cpu->memory.activeRegion != (const uint32_t*) gba->fx.content);
+	assert_true(_load(core, rom, BOOT_SIZE));
+	assert_null(gba->fx.content);
+	assert_null(gba->fx.contentMapping);
+	assert_int_equal(core->rawRead32(core, GBA_FX_CONTENT_BASE, -1), 0);
+#else
+	assert_false(_load(core, rom, BOOT_SIZE + size + GBA_FX_FOOTER_SIZE));
+#endif
+	_destroy(core);
+	free(rom);
+}
+
+static void* (*_contentOriginalMap)(struct VFile*, size_t, int);
+static void (*_contentOriginalUnmap)(struct VFile*, void*, size_t);
+static unsigned _contentMapAttempts;
+static unsigned _contentUnmaps;
+
+static void* _contentSecondMapFails(struct VFile* vf, size_t size, int flags) {
+	if (++_contentMapAttempts == 2) {
+		return 0;
+	}
+	return _contentOriginalMap(vf, size, flags);
+}
+
+static void _contentCountUnmap(struct VFile* vf, void* memory, size_t size) {
+	++_contentUnmaps;
+	_contentOriginalUnmap(vf, memory, size);
+}
+
+M_TEST_DEFINE(contentMappingFailure) {
+	uint8_t* rom = _contentRom(31);
+	struct mCore* core = _core();
+	struct VFile* vf = VFileMemChunk(rom, BOOT_SIZE + 31 + GBA_FX_FOOTER_SIZE);
+	vf->map = _failedMap;
+	assert_false(core->loadROM(core, vf));
+	assert_null(((struct GBA*) core->board)->fx.contentMapping);
+	assert_null(((struct GBA*) core->board)->memory.rom);
+	vf->close(vf);
+#ifdef _WIN32
+	vf = VFileMemChunk(rom, BOOT_SIZE + 31 + GBA_FX_FOOTER_SIZE);
+	_contentOriginalMap = vf->map;
+	_contentOriginalUnmap = vf->unmap;
+	_contentMapAttempts = _contentUnmaps = 0;
+	vf->map = _contentSecondMapFails;
+	vf->unmap = _contentCountUnmap;
+	assert_false(core->loadROM(core, vf));
+	assert_int_equal(_contentMapAttempts, 2);
+	assert_int_equal(_contentUnmaps, 1);
+	assert_null(((struct GBA*) core->board)->fx.contentMapping);
+	vf->close(vf);
+	assert_true(mCorePreloadVF(core, VFileMemChunk(rom, BOOT_SIZE + 31 + GBA_FX_FOOTER_SIZE)));
+	assert_int_equal(core->busRead8(core, GBA_FX_CONTENT_BASE + 30), _contentByte(30));
+#endif
+	mCoreConfigSetIntValue(&core->config, "gba.fxMemoryMiB", 96);
+	core->loadConfig(core, &core->config);
+	assert_false(_load(core, rom, BOOT_SIZE + 31 + GBA_FX_FOOTER_SIZE));
+	assert_false(((struct GBA*) core->board)->fx.active);
+	_destroy(core);
+	free(rom);
+}
+
 M_TEST_SUITE_DEFINE(GBAFX,
+	cmocka_unit_test(contentDescriptor),
+	cmocka_unit_test(contentBanksAndBounds),
+	cmocka_unit_test(contentMappingFailure),
 	cmocka_unit_test(ramGrant),
 	cmocka_unit_test(ramAccess),
 	cmocka_unit_test(ramExecutionAndTransfers),

@@ -23,6 +23,7 @@ PIXELS = _diagnostic.PIXELS
 POLICY_FIELDS = _diagnostic.POLICY_FIELDS
 TIMING_FIELDS = _diagnostic.TIMING_FIELDS
 RAM_FIELDS = _diagnostic.RAM_FIELDS
+CONTENT_FIELDS = _diagnostic.CONTENT_FIELDS
 
 
 def read_png(path):
@@ -87,12 +88,15 @@ def rgb555(value):
 
 def verify(path, rom, mode, memory, cpu):
     actual = read_png(path)
-    data = rom.read_bytes()
-    asset = 0x1000 if mode in ("policy", "timing", "ram") else 0x200 + int(mode) * PIXELS * 2
+    with rom.open("rb") as source:
+        data = source.read(256 * 1024)
+        source.seek(-64, 2)
+        footer = source.read(64)
+    asset = 0x1000 if mode in ("policy", "timing", "ram", "content") else 0x200 + int(mode) * PIXELS * 2
     expected = [rgb555(value) for value in struct.unpack_from(f"<{PIXELS}H", data, asset)]
     values = []
-    if mode in ("policy", "timing", "ram"):
-        fields = RAM_FIELDS if mode == "ram" else TIMING_FIELDS if mode == "timing" else POLICY_FIELDS
+    if mode in ("policy", "timing", "ram", "content"):
+        fields = CONTENT_FIELDS if mode == "content" else RAM_FIELDS if mode == "ram" else TIMING_FIELDS if mode == "timing" else POLICY_FIELDS
         for field, (label, _) in enumerate(fields):
             text = ""
             for digit in range(10):
@@ -130,6 +134,12 @@ def verify(path, rom, mode, memory, cpu):
         raise ValueError(f"RAM pattern/execution check failed: {values}")
     if mode == "ram" and values[0] != {0: 16, 97: 1, 100: 4}[memory]:
         raise ValueError(f"Unexpected RAM grant for the test budget: {values}")
+    if mode == "content":
+        size = struct.unpack_from("<I", footer, 0x1C)[0]
+        last_byte = ((0xA5C39E71 ^ ((size - 1) // 4)) >> (((size - 1) % 4) * 8)) & 255
+        expected_values = [size, size // 4, 0, (size + 0xFFFFFF) // 0x1000000, last_byte, 1]
+        if values != expected_values:
+            raise ValueError(f"Content validation failed: {values} != {expected_values}")
     if actual != expected:
         index = next(index for index, pair in enumerate(zip(actual, expected)) if pair[0] != pair[1])
         raise ValueError(f"Screen mismatch at pixel {index}: {actual[index]} != {expected[index]}")
@@ -141,6 +151,7 @@ def main():
     parser.add_argument("--cinema", type=Path, required=True)
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--timing", action="store_true")
+    parser.add_argument("--content", action="store_true")
     args = parser.parse_args()
     fixtures = args.fixtures.resolve()
     run_root = Path(tempfile.mkdtemp(prefix="visual-", dir=fixtures))
@@ -151,13 +162,16 @@ def main():
                   ("ram-97", "ram", 97, 80), ("ram-100", "ram", 100, 80)]
     if args.timing:
         cases += [("timing-1x", "timing", 1, 80), ("timing-2x", "timing", 2, 80)]
+    if args.content:
+        cases += [("content-64", "content", 0, 80), ("content-128", "content", 0, 80),
+                  ("content-tail", "content", 0, 80)]
     for name, mode, memory, cpu in cases:
         case = run_root / name
         case.mkdir()
         shutil.copyfile(fixtures / ("resources.gba" if mode == "policy" else "ram.gba" if mode == "ram" else f"{name}.gba"), case / "test.gba")
         (case / "config.ini").write_text(
             f"[ports.cinema]\nskipBios=1\nuseBios=0\ngba.fxMemoryMiB={memory if mode in ('policy', 'ram') else 0}\ngba.fxCPUPercent={cpu}\n"
-            f"[testinfo]\nskip={2048 if mode == 'ram' else 8}\nframes=1\n", encoding="utf-8")
+            f"[testinfo]\nskip={8192 if mode == 'content' else 2048 if mode == 'ram' else 8}\nframes=1\n", encoding="utf-8")
     # Missing references are captured only in a new, ignored directory. They are
     # checked independently below; these images never become compatibility baselines.
     result = subprocess.run([str(args.cinema.resolve()), "-b", str(run_root), "-R", "-v"],

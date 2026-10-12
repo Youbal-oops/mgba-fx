@@ -5,10 +5,12 @@
 """Generate original ordinary/enhanced GBA diagnostics without an ARM SDK."""
 
 import argparse
+from array import array
 import hashlib
 import json
 from pathlib import Path
 import struct
+import sys
 import zlib
 
 
@@ -73,6 +75,8 @@ POLICY_FIELDS = (
 TIMING_FIELDS = (("ALU PROFILE X", 0x3F4), ("ADDS THIS FRAME", 0), ("GUEST RAM MIB", 0x3EC))
 RAM_FIELDS = (("GUEST RAM MIB", 0), ("WORDS VERIFIED", 0), ("DATA ERRORS", 0),
               ("ARM RESULT", 0), ("THUMB RESULT", 0))
+CONTENT_FIELDS = (("CONTENT BYTES", 0), ("WORDS VERIFIED", 0), ("DATA ERRORS", 0),
+                  ("BANKS CHECKED", 0), ("LAST BYTE", 0), ("RAM COPY OK", 0))
 
 
 def draw_text(pixels, text, x, y, scale=1):
@@ -488,11 +492,164 @@ def ram_image(repo_root):
     return enhanced_image(bytes(image), features=11, minimum_ram=1048576)
 
 
+def content_boot(repo_root):
+    image = bytearray(policy_image(repo_root)[:-FOOTER_SIZE])
+    image[0xA0:0xAC] = b"FX CONTENT  "
+    image[0xAC:0xB0] = b"FX06"
+    image[0xBD] = (-sum(image[0xA0:0xBD]) - 0x19) & 0xFF
+    background = [0x0200] * PIXELS
+    draw_text(background, "GBA FX CONTENT", 30, 8, 2)
+    for index, (label, _) in enumerate(CONTENT_FIELDS):
+        draw_text(background, label, 8, 34 + index * 14)
+    draw_text(background, "FULL PAYLOAD PATTERN CHECK", 8, 130)
+    draw_text(background, "READ ONLY BANKED CONTENT", 8, 148)
+    image[0x1000:0x1000 + PIXELS * 2] = struct.pack(f"<{PIXELS}H", *background)
+    boot = ArmProgram(0xC0)
+    boot.literal(1, 0x04000000)
+    boot.literal(2, 0x0403)
+    boot.emit(0xE1C120B0)
+    boot.literal(4, 0x08001000)
+    boot.literal(5, 0x06000000)
+    boot.literal(3, PIXELS)
+    boot.label("background")
+    boot.emit(0xE0D460B2)
+    boot.emit(0xE0C560B2)
+    boot.emit(0xE2533001)
+    boot.branch("background", condition=1)
+    boot.literal(4, 0x08016000)
+    boot.literal(5, 0x03000000)
+    size_literal = len(boot.words)
+    boot.literal(3, 0)
+    boot.label("code")
+    boot.emit(0xE4946004)
+    boot.emit(0xE4856004)
+    boot.emit(0xE2533001)
+    boot.branch("code", condition=1)
+    boot.literal(12, 0x03000000)
+    boot.emit(0xE12FFF1C)
+    emit_decimal(boot)
+    decimal_address = 0x08000000 + boot.origin + boot.labels["decimal"] * 4
+    work = ArmProgram(0x03000000)
+    work.literal(4, 0x040003A4)
+    work.emit(0xE5940000)
+    work.literal(4, 0x02000004)
+    work.emit(0xE5840000)
+    work.emit(0xE1A0A120)  # r10 = byte length >> 2 (total whole words).
+    work.literal(4, 0x02000008)
+    work.emit(0xE584A000)
+    work.literal(7, 0xA5C39E71)
+    work.emit(0xE3A01000)  # Global word index.
+    work.emit(0xE3A08000)  # Bank index.
+    work.emit(0xE3A09000)  # Mismatch count.
+    work.label("bank")
+    work.literal(4, 0x040003A0)
+    work.emit(0xE5848000)
+    work.literal(4, 0x040003AC)
+    work.emit(0xE5943000)
+    work.emit(0xE1A03123)  # Current bank length >> 2.
+    work.literal(4, 0x11000000)
+    work.label("read")
+    work.emit(0xE4942004)
+    work.emit(0xE0215007)
+    work.emit(0xE1520005)
+    work.emit(0x12899001)
+    work.emit(0xE2811001)
+    work.emit(0xE2533001)
+    work.branch("read", condition=1)
+    work.emit(0xE2888001)
+    work.emit(0xE151000A)
+    work.branch("bank", condition=3)
+    work.literal(5, 0x02000010)
+    work.emit(0xE5858000)
+    work.literal(5, 0x02000004)
+    work.emit(0xE5953000)
+    work.emit(0xE2033003)  # Trailing bytes after the final whole word.
+    work.emit(0xE3530000)
+    work.branch("tail_done", condition=0)
+    work.emit(0xE0212007)
+    work.label("tail")
+    work.emit(0xE4D45001)  # LDRB r5, [r4], #1.
+    work.emit(0xE20260FF)  # AND r6, r2, #255.
+    work.emit(0xE1550006)
+    work.emit(0x12899001)
+    work.emit(0xE1A02422)  # MOV r2, r2, LSR #8.
+    work.emit(0xE2533001)
+    work.branch("tail", condition=1)
+    work.label("tail_done")
+    work.literal(5, 0x0200000C)
+    work.emit(0xE5859000)
+    work.literal(5, 0x040003AC)
+    work.emit(0xE5953000)
+    work.literal(4, 0x11000000)
+    work.emit(0xE0844003)
+    work.emit(0xE5540001)  # LDRB r0, [r4, #-1].
+    work.literal(5, 0x02000014)
+    work.emit(0xE5850000)
+    work.literal(4, 0x10000000)
+    work.emit(0xE5840000)
+    work.emit(0xE5942000)
+    work.emit(0xE1520000)
+    work.emit(0x03A00001)
+    work.emit(0x13A00000)
+    work.literal(5, 0x02000018)
+    work.emit(0xE5850000)
+    for index, _ in enumerate(CONTENT_FIELDS):
+        work.literal(4, 0x02000004 + index * 4)
+        work.emit(0xE5940000)
+        work.literal(1, 0x06000000 + ((34 + index * 14) * 240 + 164) * 2)
+        work.literal(12, decimal_address)
+        work.emit(0xE1A0E00F)
+        work.emit(0xE12FFF1C)
+    work.literal(4, 0x02000000)
+    work.emit(0xE3A00001)
+    work.emit(0xE5840000)
+    work.label("idle")
+    work.branch("idle")
+    code = work.finish()
+    boot.literals = [(index, register, len(code) // 4 if index == size_literal else value, condition)
+                     for index, register, value, condition in boot.literals]
+    boot_code = boot.finish()
+    if 0xC0 + len(boot_code) > 0x1000 or len(code) > 0x8000:
+        raise ValueError("Content diagnostic exceeds its code region")
+    image[0xC0:0x1000] = bytes(0x1000 - 0xC0)
+    image[0xC0:0xC0 + len(boot_code)] = boot_code
+    image[0x16000:0x16000 + len(code)] = code
+    return bytes(image)
+
+
+def write_content_fixture(path, boot, size):
+    checksum = 0
+    digest = hashlib.sha256()
+    with path.open("wb") as output:
+        output.write(boot)
+        digest.update(boot)
+        offset = 0
+        while offset < size:
+            count = min(1048576, size - offset)
+            words = array("I", (0xA5C39E71 ^ index for index in range(offset // 4, (offset + count + 3) // 4)))
+            if words.itemsize != 4:
+                raise ValueError("Expected four-byte unsigned integers")
+            if sys.byteorder != "little":
+                words.byteswap()
+            block = words.tobytes()[:count]
+            output.write(block)
+            digest.update(block)
+            checksum = zlib.crc32(block, checksum)
+            offset += count
+        body = struct.pack("<11I", 1, FOOTER_SIZE, 27, 0, len(boot), zlib.crc32(boot),
+                           1048576, size, checksum, 0, 0)
+        footer = body + struct.pack("<I", zlib.crc32(body)) + FOOTER_MAGIC
+        output.write(footer)
+        digest.update(footer)
+    return {"bytes": len(boot) + size + FOOTER_SIZE, "content_bytes": size, "sha256": digest.hexdigest()}
+
+
 def main():
     repo_root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=repo_root / "build-fx/diagnostics")
     parser.add_argument("--timing", action="store_true", help="Generate opt-in 1x/2x arithmetic diagnostics")
+    parser.add_argument("--content", action="store_true", help="Generate 64/128 MiB and non-power-of-two content diagnostics")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     boot = boot_image(repo_root)
@@ -507,6 +664,13 @@ def main():
         output.write_bytes(data)
         metadata[name] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
         print(output)
+    if args.content:
+        content_program = content_boot(repo_root)
+        for name, size in (("content-64", 64 * 1048576), ("content-128", 128 * 1048576),
+                           ("content-tail", 64 * 1048576 + 7)):
+            output = args.output_dir / f"{name}.gba"
+            metadata[output.name] = write_content_fixture(output, content_program, size)
+            print(output)
     (args.output_dir / "fixtures.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
 
