@@ -71,6 +71,7 @@ void GBACreate(struct GBA* gba) {
 
 static void GBAInit(void* cpu, struct mCPUComponent* component) {
 	struct GBA* gba = (struct GBA*) component;
+	memset(&gba->fx, 0, sizeof(gba->fx));
 	gba->cpu = cpu;
 	gba->debugger = 0;
 	gba->sync = 0;
@@ -138,6 +139,7 @@ static void GBAInit(void* cpu, struct mCPUComponent* component) {
 }
 
 void GBAUnloadROM(struct GBA* gba) {
+	memset(&gba->fx, 0, sizeof(gba->fx));
 	GBAMemoryClearAGBPrint(gba);
 	if (gba->memory.unl.type) {
 		GBAUnlCartUnload(gba);
@@ -400,6 +402,7 @@ bool GBALoadNull(struct GBA* gba) {
 }
 
 bool GBALoadMB(struct GBA* gba, struct VFile* vf) {
+	memset(&gba->fx, 0, sizeof(gba->fx));
 	GBAUnloadMB(gba);
 	gba->mbVf = vf;
 	vf->seek(vf, 0, SEEK_SET);
@@ -424,12 +427,19 @@ void GBAUnloadMB(struct GBA* gba) {
 
 bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 	if (!vf) {
+		memset(&gba->fx, 0, sizeof(gba->fx));
 		return false;
 	}
 	GBAUnloadROM(gba);
+	struct GBAFXState fx;
+	enum GBAFXDetection detection = GBAFXReadFooter(vf, &fx);
+	if (detection == GBA_FX_INVALID) {
+		mLOG(GBA, WARN, "Invalid or unsupported GBA-FX development footer");
+		return false;
+	}
 	gba->romVf = vf;
 	gba->isPristine = true;
-	gba->pristineRomSize = vf->size(vf);
+	gba->pristineRomSize = fx.active ? fx.bootSize : vf->size(vf);
 	vf->seek(vf, 0, SEEK_SET);
 	if (gba->pristineRomSize > GBA_SIZE_ROM0) {
 		char ident;
@@ -477,7 +487,16 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 		// This ROM is either a bad dump or homebrew. Emulate flash cart behavior.
 #ifndef FIXED_ROM_BUFFER
 		void* newRom = anonymousMemoryMap(GBA_SIZE_ROM0);
+		if (!newRom) {
+			vf->unmap(vf, gba->memory.rom, gba->pristineRomSize);
+			gba->memory.rom = 0;
+			gba->romVf = 0;
+			gba->memory.romSize = 0;
+			gba->memory.romMask = 0;
+			return false;
+		}
 		memcpy(newRom, gba->memory.rom, gba->pristineRomSize);
+		vf->unmap(vf, gba->memory.rom, gba->pristineRomSize);
 		gba->memory.rom = newRom;
 #endif
 		gba->memory.romSize = GBA_SIZE_ROM0;
@@ -489,6 +508,10 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 	}
 	GBAHardwareInit(&gba->memory.hw, &((uint16_t*) gba->memory.rom)[GPIO_REG_DATA >> 1]);
 	GBAUnlCartDetect(gba);
+	gba->fx = fx;
+	if (fx.active) {
+		mLOG(GBA, INFO, "GBA-FX development ROM detected (identification only)");
+	}
 	// TODO: error check
 	return true;
 }
@@ -552,6 +575,10 @@ void GBALoadBIOS(struct GBA* gba, struct VFile* vf) {
 }
 
 void GBAApplyPatch(struct GBA* gba, struct Patch* patch) {
+	if (gba->fx.active) {
+		mLOG(GBA, WARN, "Regenerate the GBA-FX footer after patching the boot image");
+		return;
+	}
 	size_t patchedSize = patch->outputSize(patch, gba->memory.romSize);
 	if (!patchedSize || patchedSize > GBA_SIZE_ROM0) {
 		return;

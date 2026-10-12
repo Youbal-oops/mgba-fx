@@ -765,8 +765,11 @@ void Window::showEvent(QShowEvent* event) {
 	m_wasOpened = true;
 #ifdef Q_OS_WIN
 	HWND hwnd = reinterpret_cast<HWND>(winId());
-	DWM_WINDOW_CORNER_PREFERENCE cornerPref = DWMWCP_DONOTROUND;
-	DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPref, sizeof(cornerPref));
+	// Windows 11 values, also usable with older MinGW SDK headers.
+	// https://learn.microsoft.com/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
+	constexpr DWORD windowCornerPreference = 33;
+	const DWORD doNotRound = 1;
+	DwmSetWindowAttribute(hwnd, windowCornerPreference, &doNotRound, sizeof(doNotRound));
 #endif
 	if (m_initialSize.isValid()) {
 		resizeFrame(m_initialSize);

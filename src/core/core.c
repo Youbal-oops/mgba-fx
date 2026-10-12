@@ -96,6 +96,9 @@ struct mCore* mCoreCreate(enum mPlatform platform) {
 #endif
 
 struct mCore* mCoreFind(const char* path) {
+	if (!path) {
+		return 0;
+	}
 	struct mCore* core = NULL;
 #if defined(ENABLE_VFS) && defined(ENABLE_DIRECTORIES)
 	struct VDir* archive = VDirOpenArchive(path);

@@ -1,0 +1,5 @@
+# Portable Windows build helpers, installed under build-tools/python.
+cmake==3.31.6
+ninja==1.11.1.4
+aqtinstall==3.3.0
+backports.zstd==1.8.0

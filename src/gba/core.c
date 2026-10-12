@@ -622,6 +622,12 @@ static void _GBACoreSetAVStream(struct mCore* core, struct mAVStream* stream) {
 
 static bool _GBACoreLoadROM(struct mCore* core, struct VFile* vf) {
 	struct GBACore* gbacore = (struct GBACore*) core;
+	struct GBA* gba = core->board;
+	memset(&gba->fx, 0, sizeof(gba->fx));
+	if (GBAFXHasFooter(vf)) {
+		gbacore->memoryBlockType = -2;
+		return GBALoadROM(gba, vf);
+	}
 #ifdef USE_ELF
 	struct ELF* elf = ELFOpen(vf);
 	if (elf) {
@@ -663,6 +669,10 @@ static bool _GBACoreLoadTemporarySave(struct mCore* core, struct VFile* vf) {
 }
 
 static bool _GBACoreLoadPatch(struct mCore* core, struct VFile* vf) {
+	if (((struct GBA*) core->board)->fx.active) {
+		mLOG(GBA, WARN, "Regenerate the GBA-FX footer after patching the boot image");
+		return false;
+	}
 	if (!vf) {
 		return false;
 	}

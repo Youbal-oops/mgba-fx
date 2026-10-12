@@ -1168,7 +1168,9 @@ uint16_t GBAView16(struct ARMCore* cpu, uint32_t address) {
 		value = GBALoad16(cpu, address, 0);
 		break;
 	case GBA_REGION_IO:
-		if ((address & OFFSET_MASK) < GBA_REG_MAX || (address & OFFSET_MASK) == GBA_REG_POSTFLG) {
+		if (gba->fx.active && (address & OFFSET_MASK) >= GBA_FX_IO_BASE && (address & OFFSET_MASK) < GBA_FX_IO_BASE + 16) {
+			value = GBAFXReadRegister(address & OFFSET_MASK);
+		} else if ((address & OFFSET_MASK) < GBA_REG_MAX || (address & OFFSET_MASK) == GBA_REG_POSTFLG) {
 			value = gba->memory.io[(address & OFFSET_MASK) >> 1];
 		} else if ((address & OFFSET_MASK) == GBA_REG_EXWAITCNT_LO || (address & OFFSET_MASK) == GBA_REG_EXWAITCNT_HI) {
 			address += GBA_REG_INTERNAL_EXWAITCNT_LO - GBA_REG_EXWAITCNT_LO;

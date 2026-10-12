@@ -771,6 +771,9 @@ uint16_t GBAIORead(struct GBA* gba, uint32_t address) {
 		// Most IO reads need to disable idle removal
 		gba->haltPending = false;
 	}
+	if (gba->fx.active && address >= GBA_FX_IO_BASE && address < GBA_FX_IO_BASE + 16) {
+		return GBAFXReadRegister(address);
+	}
 
 	switch (address) {
 	// Reading this takes two cycles (1N+1I), so let's remove them preemptively
