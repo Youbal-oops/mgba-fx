@@ -86,7 +86,9 @@ data, subsystem rollback, and unchanged ordinary raw/PNG formats.
 
 Qt state loading and scripting use the shared named-state path. The Qt save
 converter recognizes enhanced states and locates raw savedata after the dynamic
-RAM suffix. Libretro uses the dynamic named-state size and propagates save
-failure, but this milestone validates the Windows desktop build. Video-log
-recordings have their own format and are not covered by enhanced persistence.
+RAM suffix. Libretro rejects marked enhanced ROMs pending frontend validation.
+Enhanced video-log recording and playback are rejected because their separate
+format has not been validated for the enhanced machine. Ordinary recording
+remains supported. See [fx-release-candidate.md](fx-release-candidate.md) for
+the desktop release checks and remaining limits.
 Manual desktop save/load/rewind testing remains useful before wider release.

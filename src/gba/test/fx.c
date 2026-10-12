@@ -7,6 +7,7 @@
 #include <mgba/core/rewind.h>
 #include <mgba/core/serialize.h>
 #include <mgba/core/thread.h>
+#include <mgba/feature/video-logger.h>
 #include <mgba/gba/core.h>
 #ifdef M_CORE_GB
 #include <mgba/gb/core.h>
@@ -406,6 +407,84 @@ M_TEST_DEFINE(instanceMemoryLoading) {
 #endif
 }
 
+M_TEST_DEFINE(releaseRepeatedLifecycle) {
+#ifdef _WIN32
+	uint8_t* rom = _rom();
+	_write32(rom + BOOT_SIZE + 8, GBA_FX_FEATURE_DETECTION | GBA_FX_FEATURE_POLICY | GBA_FX_FEATURE_RAM);
+	_write32(rom + BOOT_SIZE + 0x18, 1048576);
+	_footerChecksum(rom);
+	struct mCore* core = _core();
+	struct GBA* gba = core->board;
+	core->opts.skipBios = true;
+	unsigned i;
+	for (i = 0; i < 32; ++i) {
+		struct mHostResources host;
+		assert_true(mHostResourcesQuery(&host));
+		uint64_t overhead = host.committedBytes > 67108864 ? host.committedBytes : 67108864;
+		unsigned baseMiB = (overhead + 33554432 + 1048575) / 1048576;
+		gba->fxPolicy.memoryMiB = baseMiB + (i & 1 ? 64 : 4);
+		assert_true(_load(core, rom, BOOT_SIZE + GBA_FX_FOOTER_SIZE));
+		if (i & 1) {
+			assert_int_equal(gba->fx.ramSize, GBA_FX_RAM_MAX);
+		} else {
+			assert_true(gba->fx.ramSize >= 1048576 && gba->fx.ramSize <= 4194304);
+		}
+		core->reset(core);
+		core->busWrite32(core, GBA_FX_RAM_BASE, 100 + i);
+		size_t size = core->stateSize(core);
+		void* snapshot = malloc(size);
+		assert_non_null(snapshot);
+		assert_true(core->saveState(core, snapshot));
+		core->reset(core);
+		assert_int_equal(core->busRead32(core, GBA_FX_RAM_BASE), 0);
+		assert_true(core->loadState(core, snapshot));
+		assert_int_equal(core->busRead32(core, GBA_FX_RAM_BASE), 100 + i);
+		free(snapshot);
+		rom[BOOT_SIZE] = 2;
+		_footerChecksum(rom);
+		assert_false(_load(core, rom, BOOT_SIZE + GBA_FX_FOOTER_SIZE));
+		assert_null(gba->fx.ram);
+		assert_null(gba->fx.budgetOwner);
+		rom[BOOT_SIZE] = 1;
+		_footerChecksum(rom);
+		assert_true(_load(core, rom, BOOT_SIZE));
+		assert_false(gba->fx.active);
+	}
+	_destroy(core);
+	free(rom);
+#endif
+}
+
+M_TEST_DEFINE(descriptorMutationSweep) {
+	uint8_t* original = _rom();
+	uint8_t* mutated = malloc(BOOT_SIZE + GBA_FX_FOOTER_SIZE);
+	assert_non_null(mutated);
+	uint32_t random = 0xF17E2026;
+	unsigned i;
+	for (i = 0; i < 1024; ++i) {
+		memcpy(mutated, original, BOOT_SIZE + GBA_FX_FOOTER_SIZE);
+		random = random * 1664525U + 1013904223U;
+		size_t offset = random % (BOOT_SIZE + GBA_FX_FOOTER_SIZE);
+		mutated[offset] ^= 1U << ((random >> 24) & 7);
+		struct GBAFXState fx;
+		assert_true(_detect(mutated, BOOT_SIZE + GBA_FX_FOOTER_SIZE, &fx) != GBA_FX_VALID);
+		if (!(i & 3)) {
+			_write32(mutated + BOOT_SIZE + 0x14, doCrc32(mutated, BOOT_SIZE));
+			_footerChecksum(mutated);
+			if (_detect(mutated, BOOT_SIZE + GBA_FX_FOOTER_SIZE, &fx) == GBA_FX_VALID) {
+				assert_true(fx.active);
+				assert_int_equal(fx.bootSize, BOOT_SIZE);
+				assert_true(!(fx.requiredFeatures & ~GBA_FX_SUPPORTED_FEATURES));
+			}
+		}
+		assert_null(fx.ram);
+		assert_null(fx.contentMapping);
+		assert_null(fx.budgetOwner);
+	}
+	free(mutated);
+	free(original);
+}
+
 M_TEST_DEFINE(resourceBudget) {
 	struct GBAFXPolicy policy;
 	GBAFXPolicyDefaults(&policy);
@@ -562,14 +641,17 @@ static void _audioTrace(struct mAVStream* stream, int16_t left, int16_t right) {
 	++trace->samples;
 }
 
-static struct mCore* _timingCore(bool fast, bool thumb) {
+static struct mCore* _timingCoreWithRAM(bool fast, bool thumb, bool ram) {
 	struct mCore* core = _core();
 	mCoreConfigSetIntValue(&core->config, "gba.fxMemoryMiB", 256);
 	((struct GBA*) core->board)->fxPolicy.memoryMiB = 256;
 	core->opts.skipBios = true;
 	core->opts.useBios = false;
 	uint8_t* rom = _rom();
-	_write32(rom + BOOT_SIZE + 8, GBA_FX_FEATURE_DETECTION | (fast ? GBA_FX_FEATURE_ALU2X : 0));
+	_write32(rom + BOOT_SIZE + 8, GBA_FX_FEATURE_DETECTION | (fast ? GBA_FX_FEATURE_ALU2X : 0) | (ram ? GBA_FX_FEATURE_RAM : 0));
+	if (ram) {
+		_write32(rom + BOOT_SIZE + 0x18, 1048576);
+	}
 	_footerChecksum(rom);
 	assert_true(_load(core, rom, BOOT_SIZE + GBA_FX_FOOTER_SIZE));
 	free(rom);
@@ -603,6 +685,54 @@ static struct mCore* _timingCore(bool fast, bool thumb) {
 	}
 	assert_int_equal(gba->fx.aluPhase, 0);
 	return core;
+}
+
+static struct mCore* _timingCore(bool fast, bool thumb) {
+	return _timingCoreWithRAM(fast, thumb, false);
+}
+
+M_TEST_DEFINE(releaseActiveSoak) {
+	const char* requested = getenv("MGBA_FX_SOAK_FRAMES");
+	if (!requested) {
+		skip();
+	}
+	unsigned frames = strtoul(requested, 0, 10);
+	assert_true(frames >= 120 && frames <= 36000);
+	struct mCore* core = _timingCoreWithRAM(true, true, true);
+	struct GBA* gba = core->board;
+	assert_int_equal(gba->fx.ramSize, GBA_FX_RAM_MAX);
+	core->busWrite16(core, 0x04000102, 0x81);
+	core->busWrite16(core, 0x04000084, 0x80);
+	core->busWrite16(core, 0x04000080, 0x1177);
+	core->busWrite16(core, 0x04000082, 2);
+	core->busWrite16(core, 0x04000062, 0xF080);
+	core->busWrite16(core, 0x04000064, 0x8600);
+	struct TimingTrace trace = { .stream.postAudioFrame = _audioTrace };
+	core->setAVStream(core, &trace.stream);
+	void* snapshot = malloc(core->stateSize(core));
+	assert_non_null(snapshot);
+	unsigned i;
+	for (i = 0; i < frames; ++i) {
+		core->busWrite32(core, GBA_FX_RAM_BASE + GBA_FX_RAM_MAX - 4, i);
+		core->runFrame(core);
+		assert_int_equal(core->busRead32(core, GBA_FX_RAM_BASE + GBA_FX_RAM_MAX - 4), i);
+		if (!(i % 300)) {
+			assert_true(core->saveState(core, snapshot));
+			core->runFrame(core);
+			uint64_t instructions = gba->fx.acceleratedInstructions;
+			uint32_t result = ((struct ARMCore*) core->cpu)->gprs[0];
+			assert_true(core->loadState(core, snapshot));
+			core->runFrame(core);
+			assert_int_equal(gba->fx.acceleratedInstructions, instructions);
+			assert_int_equal((uint32_t) ((struct ARMCore*) core->cpu)->gprs[0], result);
+		}
+	}
+	assert_true(trace.samples > frames * 400U);
+	assert_true(trace.audioHash != 0);
+	printf("active_soak frames=%u ram_bytes=%u instructions=%" PRIu64 " audio_samples=%u hash=%08X\n",
+	       frames, gba->fx.ramSize, gba->fx.acceleratedInstructions, trace.samples, trace.audioHash);
+	free(snapshot);
+	_destroy(core);
 }
 
 M_TEST_DEFINE(fractionalRetirement) {
@@ -1166,6 +1296,64 @@ M_TEST_DEFINE(stateValidationAndRollback) {
 	_destroy(core);
 }
 
+M_TEST_DEFINE(enhancedVideoLogsRejected) {
+#ifndef MINIMAL_CORE
+	struct mCore* core = _ramCore(1048576);
+	assert_null(mVideoLogContextCreate(core));
+	uint8_t* rom = _rom();
+	assert_true(_load(core, rom, BOOT_SIZE));
+	mColor* pixels = calloc(240 * 160, sizeof(*pixels));
+	assert_non_null(pixels);
+	core->setVideoBuffer(core, pixels, 240);
+	core->reset(core);
+	struct mVideoLogContext* log = mVideoLogContextCreate(core);
+	assert_non_null(log);
+	struct VFile* output = VFileMemChunk(0, 0);
+	mVideoLogContextSetOutput(log, output);
+	mVideoLogContextWriteHeader(log, core);
+	mVideoLogContextDestroy(core, log, false);
+	assert_true(output->size(output) > 0);
+	output->close(output);
+	free(rom);
+	_destroy(core);
+	free(pixels);
+#endif
+}
+
+M_TEST_DEFINE(stateMutationSweep) {
+	struct mCore* core = _ramCore(1048576);
+	struct GBA* gba = core->board;
+	uint32_t random = 0xC0DEF17E;
+	unsigned i;
+	for (i = 0; i < gba->fx.ramSize / 4; ++i) {
+		random = random * 1664525U + 1013904223U;
+		gba->fx.ram[i] = random;
+	}
+	size_t size = core->stateSize(core);
+	uint8_t* original = malloc(size);
+	uint8_t* mutated = malloc(size);
+	uint8_t* after = malloc(size);
+	assert_non_null(original);
+	assert_non_null(mutated);
+	assert_non_null(after);
+	assert_true(core->saveState(core, original));
+	_stateChecksum(original, size);
+	assert_true(core->loadState(core, original));
+	assert_true(core->saveState(core, original));
+	for (i = 0; i < 256; ++i) {
+		memcpy(mutated, original, size);
+		random = random * 1664525U + 1013904223U;
+		mutated[random % size] ^= 1U << ((random >> 24) & 7);
+		assert_false(core->loadState(core, mutated));
+	}
+	assert_true(core->saveState(core, after));
+	assert_memory_equal(original, after, size);
+	free(original);
+	free(mutated);
+	free(after);
+	_destroy(core);
+}
+
 M_TEST_DEFINE(stateCartridgeSaveAndExtraction) {
 	struct mCore* core = _ramCore(1048576);
 	struct GBA* gba = core->board;
@@ -1217,6 +1405,12 @@ M_TEST_DEFINE(stateGrantsAndRewindBudget) {
 			gba->fx.ram[word] = 0xA5C39E71U ^ word;
 		}
 		assert_true(core->saveState(core, snapshot));
+		uint32_t storedCRC;
+		LOAD_32(storedCRC, sizeof(struct GBASerializedState) + 0x34, snapshot);
+		_stateChecksum(snapshot, size);
+		uint32_t referenceCRC;
+		LOAD_32(referenceCRC, sizeof(struct GBASerializedState) + 0x34, snapshot);
+		assert_int_equal(storedCRC, referenceCRC);
 		core->reset(core);
 		assert_true(core->loadState(core, snapshot));
 		assert_memory_equal(gba->fx.ram, snapshot + sizeof(struct GBASerializedState) + GBA_FX_STATE_HEADER_SIZE, sizes[i]);
@@ -1232,6 +1426,23 @@ M_TEST_DEFINE(stateGrantsAndRewindBudget) {
 }
 
 #ifndef DISABLE_THREADING
+M_TEST_DEFINE(threadedRewindCaptures) {
+	struct mCore* core = _ramCore(1048576);
+	struct mCoreRewindContext rewind = {0};
+	mCoreRewindContextInit(&rewind, 4, true);
+	unsigned i;
+	for (i = 0; i < 16; ++i) {
+		core->busWrite32(core, GBA_FX_RAM_BASE, i);
+		mCoreRewindAppend(&rewind, core);
+	}
+	assert_true(mCoreRewindRestore(&rewind, core, 1));
+	assert_int_equal(core->busRead32(core, GBA_FX_RAM_BASE), 14);
+	assert_true(mCoreRewindRestore(&rewind, core, 2));
+	assert_int_equal(core->busRead32(core, GBA_FX_RAM_BASE), 12);
+	mCoreRewindContextDeinit(&rewind);
+	_destroy(core);
+}
+
 M_TEST_DEFINE(stateThreadRewindPressure) {
 	struct mCore* core = _ramCore(1048576);
 	struct GBA* gba = core->board;
@@ -1513,13 +1724,17 @@ M_TEST_SUITE_DEFINE(GBAFX,
 	cmocka_unit_test(ramLifecycle),
 	cmocka_unit_test(ramStateRestored),
 	cmocka_unit_test(stateValidationAndRollback),
+	cmocka_unit_test(stateMutationSweep),
+	cmocka_unit_test(enhancedVideoLogsRejected),
 	cmocka_unit_test(stateCartridgeSaveAndExtraction),
 	cmocka_unit_test(stateGrantsAndRewindBudget),
 #ifndef DISABLE_THREADING
+	cmocka_unit_test(threadedRewindCaptures),
 	cmocka_unit_test(stateThreadRewindPressure),
 #endif
 	cmocka_unit_test(experimentalFeatureGate),
 #ifdef GBA_FX_TIMING_EXPERIMENT
+	cmocka_unit_test(releaseActiveSoak),
 	cmocka_unit_test(fractionalRetirement),
 	cmocka_unit_test(armComputeAndPeripherals),
 	cmocka_unit_test(thumbComputeAndPeripherals),
@@ -1530,6 +1745,8 @@ M_TEST_SUITE_DEFINE(GBAFX,
 	cmocka_unit_test(wrappingAndEventOrder),
 #endif
 	cmocka_unit_test(resourceBudget),
+	cmocka_unit_test(descriptorMutationSweep),
+	cmocka_unit_test(releaseRepeatedLifecycle),
 	cmocka_unit_test(instanceMemoryClaims),
 	cmocka_unit_test(instanceMemoryLoading),
 	cmocka_unit_test(resourcePolicyValidation),

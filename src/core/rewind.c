@@ -115,6 +115,9 @@ void mCoreRewindAppend(struct mCoreRewindContext* context, struct mCore* core) {
 #ifndef DISABLE_THREADING
 	if (context->onThread) {
 		MutexLock(&context->mutex);
+		while (context->ready) {
+			ConditionWait(&context->cond, &context->mutex);
+		}
 	}
 #endif
 	struct VFile* nextState = context->previousState;
@@ -172,6 +175,9 @@ bool mCoreRewindRestore(struct mCoreRewindContext* context, struct mCore* core, 
 #ifndef DISABLE_THREADING
 	if (context->onThread) {
 		MutexLock(&context->mutex);
+		while (context->ready) {
+			ConditionWait(&context->cond, &context->mutex);
+		}
 	}
 #endif
 	if (!context->size) {
@@ -231,6 +237,7 @@ THREAD_ENTRY _rewindThread(void* context) {
 			_rewindDiff(rewindContext);
 		}
 		rewindContext->ready = false;
+		ConditionWake(&rewindContext->cond);
 	}
 	MutexUnlock(&rewindContext->mutex);
 	THREAD_EXIT(0);

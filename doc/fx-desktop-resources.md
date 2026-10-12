@@ -62,6 +62,11 @@ Open **File > Game resources** while the diagnostic runs. Change a resource
 setting and inspect the pending-settings row before reopening. Use explicit
 MiB budgets when running two enhanced games concurrently.
 
+The launch script waits for the GUI process and checks its actual exit code.
+With `-Rewind`, it captures every six frames by default to reduce the cost of
+copying/checksumming expanded RAM. Use `-RewindInterval 1` for every-frame
+captures, or omit `-Rewind` to compare normal frame pacing.
+
 Unit coverage checks reservation conflicts, replacement admission, failure and
 normal-game cleanup, and low-budget simultaneous loading. Qt tests load an
 original marked ROM to verify the real grant, pending settings, and CPU usage

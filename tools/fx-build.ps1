@@ -10,6 +10,7 @@ param(
     [switch]$TimingExperiment,
     [switch]$ContentPrototype,
     [switch]$AdaptivePrototype,
+    [switch]$ReleasePrototype,
     [ValidateSet('Debug', 'RelWithDebInfo', 'Release')]
     [string]$Configuration = 'RelWithDebInfo',
     [ValidateRange(1, 64)]
@@ -26,7 +27,7 @@ $depsRoot = Join-Path $toolsRoot 'deps'
 $epoxyRoot = Join-Path $depsRoot 'mingw64'
 $cmockaSource = Join-Path $toolsRoot 'cmocka-1.1.8'
 $cmockaBuild = Join-Path $toolsRoot 'cmocka-build'
-$buildRoot = Join-Path $repoRoot $(if ($AdaptivePrototype) { 'build-fx/adaptive' } elseif ($ContentPrototype) { 'build-fx/content' } elseif ($TimingExperiment) { 'build-fx/timing' } else { 'build-fx' })
+$buildRoot = Join-Path $repoRoot $(if ($ReleasePrototype) { 'build-fx/release' } elseif ($AdaptivePrototype) { 'build-fx/adaptive' } elseif ($ContentPrototype) { 'build-fx/content' } elseif ($TimingExperiment) { 'build-fx/timing' } else { 'build-fx' })
 $cmake = Join-Path $pythonRoot 'cmake/data/bin/cmake.exe'
 $ctest = Join-Path $pythonRoot 'cmake/data/bin/ctest.exe'
 $ninja = Join-Path $pythonRoot 'bin/ninja.exe'

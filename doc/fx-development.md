@@ -220,3 +220,18 @@ FX cases, sixteen complete diagnostic screens, and the available CInema
 regression (184 passes, 88 expected failures, zero unexpected failures).
 The real resource dialog was rendered and visually inspected; evidence is in
 ignored `build-fx/milestone-5-desktop/`.
+
+## Internal release candidate, 2026-10-12
+
+Step 11 adds an isolated `-ReleasePrototype` build, repeatable state/rewind
+profiling, faster enhanced state CRCs, shared rewind synchronization and patch
+tail fixes, mutation/lifecycle/soak checks, and explicit rejection of unsupported
+enhanced video logging and libretro loading. The launcher now checks the actual
+GUI exit code and allows an explicit rewind capture interval.
+
+The final desktop workflow passed 29 suites and nineteen complete diagnostic
+screens. Ordinary CInema recorded 184 passes and 88 expected failures with no
+unexpected failures; the default-profile FX and patch suites also passed.
+See [fx-release-candidate.md](fx-release-candidate.md) for launch commands,
+measurements, evidence paths, and the still-open enforced-CPU desktop pacing
+and audio check. SDK/`.gna` compatibility is not frozen.

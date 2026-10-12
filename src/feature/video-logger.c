@@ -11,6 +11,7 @@
 
 #ifdef M_CORE_GBA
 #include <mgba/gba/core.h>
+#include <mgba/internal/gba/gba.h>
 #endif
 #ifdef M_CORE_GB
 #include <mgba/gb/core.h>
@@ -499,7 +500,16 @@ bool mVideoLoggerAttachChannel(struct mVideoLogger* logger, struct mVideoLogCont
 }
 
 struct mVideoLogContext* mVideoLogContextCreate(struct mCore* core) {
+#ifdef M_CORE_GBA
+	if (core && core->platform(core) == mPLATFORM_GBA && ((struct GBA*) core->board)->fx.active) {
+		mLOG(GBA, WARN, "Video logging is unavailable for GBA-FX games");
+		return NULL;
+	}
+#endif
 	struct mVideoLogContext* context = malloc(sizeof(*context));
+	if (!context) {
+		return NULL;
+	}
 	memset(context, 0, sizeof(*context));
 
 	context->write = !!core;

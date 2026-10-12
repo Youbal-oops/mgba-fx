@@ -1167,6 +1167,13 @@ void CoreController::startVideoLog(const QString& path, bool compression) {
 	if (m_vl) {
 		return;
 	}
+	Interrupter interrupter(this);
+#ifdef M_CORE_GBA
+	if (platform() == mPLATFORM_GBA && static_cast<GBA*>(m_threadContext.core->board)->fx.active) {
+		emit statusPosted(tr("Video logging is unavailable for enhanced games."));
+		return;
+	}
+#endif
 
 	VFile* vf = VFileDevice::open(path, O_WRONLY | O_CREAT | O_TRUNC);
 	if (!vf) {
@@ -1182,6 +1189,11 @@ void CoreController::startVideoLog(VFile* vf, bool compression) {
 
 	Interrupter interrupter(this);
 	m_vl = mVideoLogContextCreate(m_threadContext.core);
+	if (!m_vl) {
+		vf->close(vf);
+		emit statusPosted(tr("Could not start video logging for this game."));
+		return;
+	}
 	m_vlVf = vf;
 	mVideoLogContextSetOutput(m_vl, m_vlVf);
 	mVideoLogContextSetCompression(m_vl, compression);

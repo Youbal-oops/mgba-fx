@@ -1885,7 +1885,23 @@ static void _GBAVLPReset(struct mCore* core) {
 static bool _GBAVLPLoadROM(struct mCore* core, struct VFile* vf) {
 	struct GBACore* gbacore = (struct GBACore*) core;
 	gbacore->logContext = mVideoLogContextCreate(NULL);
-	if (!mVideoLogContextLoad(gbacore->logContext, vf) || !mVideoLoggerAttachChannel(gbacore->vlProxy.logger, gbacore->logContext, 0)) {
+	if (!gbacore->logContext) {
+		return false;
+	}
+	bool loaded = mVideoLogContextLoad(gbacore->logContext, vf);
+	if (loaded) {
+		size_t size;
+		const void* state = mVideoLogContextInitialState(gbacore->logContext, &size);
+		uint32_t magic = 0;
+		if (state && size >= 4) {
+			LOAD_32(magic, 0, state);
+		}
+		if (magic == GBA_FX_STATE_MAGIC) {
+			mLOG(GBA, WARN, "Enhanced video-log playback is unavailable");
+			loaded = false;
+		}
+	}
+	if (!loaded || !mVideoLoggerAttachChannel(gbacore->vlProxy.logger, gbacore->logContext, 0)) {
 		mVideoLogContextDestroy(core, gbacore->logContext, false);
 		gbacore->logContext = NULL;
 		return false;

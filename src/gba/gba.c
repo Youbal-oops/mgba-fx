@@ -460,6 +460,12 @@ bool GBALoadROM(struct GBA* gba, struct VFile* vf) {
 		return false;
 	}
 	GBAUnloadROM(gba);
+#ifdef __LIBRETRO__
+	if (GBAFXHasFooter(vf)) {
+		mLOG(GBA, WARN, "GBA-FX games require the validated desktop frontend; libretro support is not available yet");
+		return false;
+	}
+#endif
 	struct GBAFXState fx;
 	enum GBAFXDetection detection = GBAFXReadFooter(vf, &fx);
 	if (detection == GBA_FX_INVALID) {

@@ -58,8 +58,8 @@ bool diffPatchFast(struct PatchFast* patch, const void* restrict in, const void*
 		extent->length = extentOff * 4;
 		extent = NULL;
 	}
-	const uint32_t* iptr8 = iptr;
-	const uint32_t* optr8 = optr;
+	const uint8_t* iptr8 = (const uint8_t*) iptr;
+	const uint8_t* optr8 = (const uint8_t*) optr;
 	for (; off < size; ++off) {
 		uint8_t a = iptr8[0] ^ optr8[0];
 		++iptr8;
@@ -68,6 +68,7 @@ bool diffPatchFast(struct PatchFast* patch, const void* restrict in, const void*
 			if (!extent) {
 				extent = PatchFastExtentsAppend(&patch->extents);
 				extent->offset = off;
+				extentOff = 0;
 			}
 			((uint8_t*) extent->extent)[extentOff] = a;
 			++extentOff;
@@ -94,31 +95,36 @@ bool _fastApplyPatch(struct Patch* p, const void* in, size_t inSize, void* out, 
 	if (inSize != outSize) {
 		return false;
 	}
-	const uint32_t* iptr = in;
-	uint32_t* optr = out;
+	const uint8_t* iptr = in;
+	uint8_t* optr = out;
 	size_t lastWritten = 0;
 	size_t s;
 	for (s = 0; s < PatchFastExtentsSize(&patch->extents); ++s) {
 		struct PatchFastExtent* extent = PatchFastExtentsGetPointer(&patch->extents, s);
-		if (extent->length + extent->offset > outSize) {
+		if (extent->offset < lastWritten || extent->offset > outSize ||
+		    extent->length > outSize - extent->offset || extent->length > sizeof(extent->extent)) {
 			return false;
 		}
 		memcpy(optr, iptr, extent->offset - lastWritten);
-		optr = (uint32_t*) out + extent->offset / 4;
-		iptr = (uint32_t*) in + extent->offset / 4;
-		uint32_t* eptr = extent->extent;
+		optr = (uint8_t*) out + extent->offset;
+		iptr = (const uint8_t*) in + extent->offset;
+		const uint8_t* eptr = (const uint8_t*) extent->extent;
 		size_t off;
 		for (off = 0; off < (extent->length & ~15); off += 16) {
-			optr[0] = iptr[0] ^ eptr[0];
-			optr[1] = iptr[1] ^ eptr[1];
-			optr[2] = iptr[2] ^ eptr[2];
-			optr[3] = iptr[3] ^ eptr[3];
-			optr += 4;
-			iptr += 4;
-			eptr += 4;
+			uint32_t a[4], b[4];
+			memcpy(a, iptr, 16);
+			memcpy(b, eptr, 16);
+			a[0] ^= b[0];
+			a[1] ^= b[1];
+			a[2] ^= b[2];
+			a[3] ^= b[3];
+			memcpy(optr, a, 16);
+			optr += 16;
+			iptr += 16;
+			eptr += 16;
 		}
 		for (; off < extent->length; ++off) {
-			*(uint8_t*) optr = *(uint8_t*) iptr ^ *(uint8_t*) eptr;
+			*optr = *iptr ^ *eptr;
 			++optr;
 			++iptr;
 			++eptr;

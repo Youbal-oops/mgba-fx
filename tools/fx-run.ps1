@@ -7,8 +7,10 @@ param(
     [switch]$RAMDiagnostic,
     [switch]$ContentPrototype,
     [switch]$AdaptivePrototype,
+    [switch]$ReleasePrototype,
     [switch]$Rewind,
     [ValidateRange(1, 300)][int]$RewindEntries = 30,
+    [ValidateRange(1, 600)][int]$RewindInterval = 6,
     [ValidateRange(1, 100)][int]$MemoryPercent = 80,
     [ValidateRange(0, 1048576)][int]$MemoryMiB = 0,
     [ValidateRange(1, 100)][int]$CPUPercent = 80
@@ -16,7 +18,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$buildRoot = Join-Path $repoRoot $(if ($AdaptivePrototype) { 'build-fx/adaptive' } elseif ($ContentPrototype) { 'build-fx/content' } elseif ($TimingExperiment) { 'build-fx/timing' } else { 'build-fx' })
+$buildRoot = Join-Path $repoRoot $(if ($ReleasePrototype) { 'build-fx/release' } elseif ($AdaptivePrototype) { 'build-fx/adaptive' } elseif ($ContentPrototype) { 'build-fx/content' } elseif ($TimingExperiment) { 'build-fx/timing' } else { 'build-fx' })
 $qtRoot = Join-Path $repoRoot 'build-tools/qt/6.8.3/mingw_64'
 $compilerBin = Join-Path $repoRoot 'build-tools/qt/Tools/mingw1310_64/bin'
 $depsRoot = Join-Path $repoRoot 'build-tools/deps'
@@ -38,7 +40,7 @@ try {
         $arguments += @('-C', 'rewindEnable=0')
     }
     if ($Rewind) {
-        $arguments += @('-C', 'rewindEnable=1', '-C', "rewindBufferCapacity=$RewindEntries")
+        $arguments += @('-C', 'rewindEnable=1', '-C', "rewindBufferCapacity=$RewindEntries", '-C', "rewindBufferInterval=$RewindInterval")
     }
     if ($RAMDiagnostic -or $ContentPrototype -or $AdaptivePrototype) {
         $arguments += @('-C', 'audioSync=0', '-C', 'videoSync=1', '-C', 'hwaccelVideo=0')
@@ -53,9 +55,13 @@ try {
         $arguments += @('-C', "gba.fxCPUPercent=$CPUPercent")
     }
     $arguments += $Rom
-    & (Join-Path $buildRoot 'mGBA.exe') @arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "mGBA exited with code $LASTEXITCODE"
+    # Start-Process joins ArgumentList; quote each argument for Windows parsing.
+    $quotedArguments = $arguments | ForEach-Object {
+        '"' + ($_ -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+    }
+    $process = Start-Process -FilePath (Join-Path $buildRoot 'mGBA.exe') -ArgumentList ($quotedArguments -join ' ') -WindowStyle Normal -PassThru -Wait
+    if ($process.ExitCode -ne 0) {
+        throw "mGBA exited with code $($process.ExitCode)"
     }
 } finally {
     $env:PATH = $oldPath

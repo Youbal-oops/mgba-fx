@@ -29,10 +29,51 @@ size_t GBAFXStateSize(const struct GBA* gba) {
 	return sizeof(struct GBASerializedState) + (gba->fx.active ? GBA_FX_STATE_HEADER_SIZE + gba->fx.ramSize : 0);
 }
 
+static uint32_t _fxCRC32(uint32_t checksum, const uint8_t* data, size_t size) {
+	if (size < 4096) {
+		return crc32(checksum, data, size);
+	}
+	// Local slicing tables avoid shared lazy-initialization races. This is
+	// the same reflected IEEE polynomial and streaming convention as zlib.
+	uint32_t table[8][256];
+	unsigned i, slice;
+	for (i = 0; i < 256; ++i) {
+		uint32_t value = i;
+		for (slice = 0; slice < 8; ++slice) {
+			value = (value >> 1) ^ ((value & 1) ? 0xEDB88320U : 0);
+		}
+		table[0][i] = value;
+	}
+	for (slice = 1; slice < 8; ++slice) {
+		for (i = 0; i < 256; ++i) {
+			uint32_t value = table[slice - 1][i];
+			table[slice][i] = (value >> 8) ^ table[0][value & 255];
+		}
+	}
+	checksum = ~checksum;
+	while (size >= 8) {
+		uint32_t first = (uint32_t) data[0] | ((uint32_t) data[1] << 8) |
+		                 ((uint32_t) data[2] << 16) | ((uint32_t) data[3] << 24);
+		uint32_t second = (uint32_t) data[4] | ((uint32_t) data[5] << 8) |
+		                  ((uint32_t) data[6] << 16) | ((uint32_t) data[7] << 24);
+		first ^= checksum;
+		checksum = table[7][first & 255] ^ table[6][(first >> 8) & 255] ^
+		           table[5][(first >> 16) & 255] ^ table[4][first >> 24] ^
+		           table[3][second & 255] ^ table[2][(second >> 8) & 255] ^
+		           table[1][(second >> 16) & 255] ^ table[0][second >> 24];
+		data += 8;
+		size -= 8;
+	}
+	while (size--) {
+		checksum = (checksum >> 8) ^ table[0][(checksum ^ *data++) & 255];
+	}
+	return ~checksum;
+}
+
 static uint32_t _fxStateCRC(const uint8_t* state, size_t size) {
 	size_t offset = sizeof(struct GBASerializedState) + 0x34;
-	uint32_t checksum = crc32(0, state, offset);
-	return crc32(checksum, state + offset + 4, size - offset - 4);
+	uint32_t checksum = _fxCRC32(0, state, offset);
+	return _fxCRC32(checksum, state + offset + 4, size - offset - 4);
 }
 
 bool GBAFXSerialize(struct GBA* gba, void* state) {
@@ -40,7 +81,8 @@ bool GBAFXSerialize(struct GBA* gba, void* state) {
 		GBASerialize(gba, state);
 		return true;
 	}
-	memset(state, 0, GBAFXStateSize(gba));
+	// Every byte of extra RAM is copied below; only the prefix has padding.
+	memset(state, 0, sizeof(struct GBASerializedState) + GBA_FX_STATE_HEADER_SIZE);
 	GBASerialize(gba, state);
 	STORE_32(GBA_FX_STATE_MAGIC, 0, state);
 	uint8_t* header = (uint8_t*) state + sizeof(struct GBASerializedState);

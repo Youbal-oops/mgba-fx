@@ -7,6 +7,7 @@
 #include <mgba/core/config.h>
 #include <mgba/core/core.h>
 #include <mgba/core/serialize.h>
+#include <mgba/core/rewind.h>
 #include <mgba/gb/core.h>
 #include <mgba/gba/core.h>
 
@@ -14,6 +15,11 @@
 #include <mgba-util/socket.h>
 #include <mgba-util/string.h>
 #include <mgba-util/vfs.h>
+#include <mgba-util/crc32.h>
+#include <mgba-util/patch/fast.h>
+#ifdef M_CORE_GBA
+#include <mgba/internal/gba/gba.h>
+#endif
 
 #ifdef __3DS__
 #include <3ds.h>
@@ -41,13 +47,15 @@ size_t romBufferSize;
 #include <inttypes.h>
 #include <sys/time.h>
 
-#define PERF_OPTIONS "DF:L:NPS:T"
+#define PERF_OPTIONS "DF:L:NPQR:S:T"
 #define PERF_USAGE \
 	"Benchmark options:\n" \
 	"  -F FRAMES        Run for the specified number of FRAMES before exiting\n" \
 	"  -N               Disable video rendering entirely\n" \
 	"  -T               Use threaded video rendering\n" \
 	"  -P               CSV output, useful for parsing\n" \
+	"  -Q               Measure raw state save, copy, CRC, and diff costs\n" \
+	"  -R INTERVAL      Capture bounded rewind every INTERVAL frames\n" \
 	"  -S SEC           Run for SEC in-game seconds before exiting\n" \
 	"  -L FILE          Load a savestate when starting the test\n" \
 	"  -D               Act as a server"
@@ -60,13 +68,15 @@ struct PerfOpts {
 	unsigned frames;
 	char* savestate;
 	bool server;
+	bool profileState;
+	unsigned rewindInterval;
 };
 
 #ifdef __SWITCH__
 TimeType __nx_time_type = TimeType_LocalSystemClock;
 #endif
 
-static void _mPerfRunloop(struct mCore* context, int* frames, bool quiet);
+static bool _mPerfRunloop(struct mCore* context, int* frames, bool quiet, unsigned rewindInterval);
 static void _mPerfShutdown(int signal);
 static bool _parsePerfOpts(struct mSubParser* parser, int option, const char* arg);
 static void _log(struct mLogger*, int, enum mLogLevel, const char*, va_list);
@@ -78,6 +88,67 @@ static struct VFile* _savestate = 0;
 static void* _outputBuffer = NULL;
 static Socket _socket = INVALID_SOCKET;
 static Socket _server = INVALID_SOCKET;
+
+static uint64_t _clockMicros(void) {
+	struct timeval tv;
+	gettimeofday(&tv, 0);
+	return 1000000LL * tv.tv_sec + tv.tv_usec;
+}
+
+static bool _profileState(struct mCore* core) {
+	size_t size = core->stateSize(core);
+#ifdef M_CORE_GBA
+	if (core->platform(core) == mPLATFORM_GBA) {
+		const struct GBA* gba = core->board;
+		if (gba->fx.active && 4 * (uint64_t) size + 1048576 > gba->fx.budget.headroomBytes) {
+			fprintf(stderr, "State profile scratch exceeds available game budget\n");
+			return false;
+		}
+	}
+#endif
+	uint8_t* snapshot = malloc(size);
+	uint8_t* copy = malloc(size);
+	if (!snapshot || !copy) {
+		free(snapshot);
+		free(copy);
+		return false;
+	}
+	uint64_t start = _clockMicros();
+	unsigned i;
+	for (i = 0; i < 32; ++i) {
+		if (!core->saveState(core, snapshot)) {
+			free(snapshot);
+			free(copy);
+			return false;
+		}
+	}
+	uint64_t save = _clockMicros() - start;
+	void* (*volatile copyMemory)(void*, const void*, size_t) = memcpy;
+	start = _clockMicros();
+	for (i = 0; i < 32; ++i) {
+		copyMemory(copy, snapshot, size);
+	}
+	uint64_t copying = _clockMicros() - start;
+	volatile uint32_t checksum = 0;
+	start = _clockMicros();
+	for (i = 0; i < 32; ++i) {
+		checksum = crc32(0, copy, size);
+	}
+	uint64_t hashing = _clockMicros() - start;
+	struct PatchFast patch;
+	initPatchFast(&patch);
+	start = _clockMicros();
+	for (i = 0; i < 32; ++i) {
+		diffPatchFast(&patch, snapshot, copy, size);
+	}
+	uint64_t diff = _clockMicros() - start;
+	deinitPatchFast(&patch);
+	fprintf(stderr, "state_profile bytes=%zu samples=32 save_us=%" PRIu64 " copy_us=%" PRIu64 " crc_us=%" PRIu64 " diff_us=%" PRIu64 " checksum=%08X\n",
+	        size, save, copying, hashing, diff, (uint32_t) checksum);
+	free(snapshot);
+	free(copy);
+	return true;
+}
 
 int main(int argc, char** argv) {
 #ifdef __3DS__
@@ -191,7 +262,6 @@ bool _mPerfRunCore(const char* fname, const struct mArguments* args, const struc
 	if (!perfOpts->noVideo) {
 		core->setVideoBuffer(core, _outputBuffer, 256);
 	}
-	mCoreLoadFile(core, fname);
 	mCoreConfigInit(&core->config, "perf");
 	mCoreConfigLoad(&core->config);
 
@@ -209,6 +279,12 @@ bool _mPerfRunCore(const char* fname, const struct mArguments* args, const struc
 	mCoreConfigLoadDefaults(&core->config, &opts);
 	mCoreConfigSetDefaultValue(&core->config, "idleOptimization", "detect");
 	mCoreLoadConfig(core);
+	if (!mCoreLoadFile(core, fname)) {
+		mCoreConfigFreeOpts(&opts);
+		mCoreConfigDeinit(&core->config);
+		core->deinit(core);
+		return false;
+	}
 
 	core->reset(core);
 	if (_savestate) {
@@ -225,14 +301,20 @@ bool _mPerfRunCore(const char* fname, const struct mArguments* args, const struc
 	struct timeval tv;
 	gettimeofday(&tv, 0);
 	uint64_t start = 1000000LL * tv.tv_sec + tv.tv_usec;
-	_mPerfRunloop(core, &frames, perfOpts->csv);
+	bool success = _mPerfRunloop(core, &frames, perfOpts->csv, perfOpts->rewindInterval);
 	gettimeofday(&tv, 0);
 	uint64_t end = 1000000LL * tv.tv_sec + tv.tv_usec;
 	uint64_t duration = end - start;
+	if (success && perfOpts->profileState) {
+		success = _profileState(core);
+	}
 
 	mCoreConfigFreeOpts(&opts);
 	mCoreConfigDeinit(&core->config);
 	core->deinit(core);
+	if (!success) {
+		return false;
+	}
 
 	float scaledFrames = frames * 1000000.f;
 	if (perfOpts->csv) {
@@ -260,7 +342,18 @@ bool _mPerfRunCore(const char* fname, const struct mArguments* args, const struc
 	return true;
 }
 
-static void _mPerfRunloop(struct mCore* core, int* frames, bool quiet) {
+static bool _mPerfRunloop(struct mCore* core, int* frames, bool quiet, unsigned rewindInterval) {
+	struct mCoreRewindContext rewind = {0};
+	uint64_t captureMicros = 0;
+	unsigned captures = 0;
+	if (rewindInterval) {
+		size_t capacity = mCoreRewindCapacity(core, 3);
+		if (!capacity) {
+			fprintf(stderr, "Rewind cannot fit the current game budget\n");
+			return false;
+		}
+		mCoreRewindContextInit(&rewind, capacity, false);
+	}
 	struct timeval lastEcho;
 	gettimeofday(&lastEcho, 0);
 	int duration = *frames;
@@ -270,6 +363,12 @@ static void _mPerfRunloop(struct mCore* core, int* frames, bool quiet) {
 		core->runFrame(core);
 		++*frames;
 		++lastFrames;
+		if (rewindInterval && !(*frames % rewindInterval)) {
+			uint64_t start = _clockMicros();
+			mCoreRewindAppend(&rewind, core);
+			captureMicros += _clockMicros() - start;
+			++captures;
+		}
 		if (!quiet) {
 			struct timeval currentTime;
 			long timeDiff;
@@ -294,6 +393,12 @@ static void _mPerfRunloop(struct mCore* core, int* frames, bool quiet) {
 	if (!quiet) {
 		printf("\033[2K\r");
 	}
+	if (rewindInterval) {
+		fprintf(stderr, "rewind_profile interval=%u captures=%u capture_us=%" PRIu64 " entries=%zu\n",
+		        rewindInterval, captures, captureMicros, mCoreRewindPatchesSize(&rewind.patchMemory));
+		mCoreRewindContextDeinit(&rewind);
+	}
+	return true;
 }
 
 static bool _mPerfRunServer(const struct mArguments* args, const struct PerfOpts* perfOpts) {
@@ -364,6 +469,18 @@ static bool _parsePerfOpts(struct mSubParser* parser, int option, const char* ar
 	case 'P':
 		opts->csv = true;
 		return true;
+	case 'Q':
+		opts->profileState = true;
+		return true;
+	case 'R': {
+		char* end;
+		unsigned long interval = strtoul(arg, &end, 10);
+		if (errno || *end || !interval || interval > 600) {
+			return false;
+		}
+		opts->rewindInterval = interval;
+		return true;
+	}
 	case 'S':
 		opts->duration = strtoul(arg, 0, 10);
 		return !errno;
